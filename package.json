@@ -1,0 +1,26 @@
+{
+  "name": "card-sorter-app",
+  "version": "1.0.0",
+  "description": "Sorter brain for the TCG card-sorter project: phone camera -> TCGTracking /scan -> price -> OK/FAIL decision -> session log -> CSV export for TCGTracking import",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/server.js",
+    "dev": "ts-node src/server.ts"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.9.0",
+    "express": "^4.21.0",
+    "multer": "^2.0.0"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/express": "^4.17.21",
+    "@types/multer": "^1.4.12",
+    "@types/node": "^22.7.5",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.6.3"
+  }
+}
