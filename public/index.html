@@ -1,0 +1,653 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+<title>Card Sorter</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg: #0f1117;
+    --surface: #1a1d27;
+    --surface2: #222636;
+    --border: #2d3148;
+    --text: #e2e8f0;
+    --muted: #8892a4;
+    --accent: #6366f1;
+    --green: #22c55e;
+    --red: #ef4444;
+    --yellow: #eab308;
+  }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+  }
+
+  header {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.75rem 1rem;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    position: sticky;
+    top: 0;
+    z-index: 10;
+  }
+  header h1 { font-size: 1rem; font-weight: 600; margin-right: auto; }
+  header nav { display: flex; gap: 0.35rem; flex-wrap: wrap; }
+  header nav button {
+    background: transparent; border: 1px solid var(--border); color: var(--muted);
+    border-radius: 6px; padding: 0.35rem 0.6rem; font-size: 0.8rem; cursor: pointer;
+  }
+  header nav button.active { color: var(--text); border-color: var(--accent); background: var(--surface2); }
+
+  main { flex: 1; padding: 1rem; max-width: 640px; width: 100%; margin: 0 auto; }
+  section[hidden] { display: none !important; }
+
+  label { display: block; font-size: 0.85rem; color: var(--muted); margin: 0.9rem 0 0.3rem; }
+  select, input[type=text], input[type=number], textarea {
+    width: 100%; background: var(--surface); border: 1px solid var(--border); color: var(--text);
+    border-radius: 8px; padding: 0.6rem 0.7rem; font-size: 1rem;
+  }
+  select[multiple] { min-height: 8rem; }
+  textarea { font-family: ui-monospace, monospace; font-size: 0.8rem; min-height: 16rem; }
+
+  button.primary {
+    width: 100%; background: var(--accent); color: white; border: none; border-radius: 10px;
+    padding: 0.9rem; font-size: 1rem; font-weight: 600; margin-top: 1.25rem; cursor: pointer;
+  }
+  button.primary:disabled { opacity: 0.5; }
+  button.secondary {
+    background: var(--surface2); color: var(--text); border: 1px solid var(--border); border-radius: 8px;
+    padding: 0.6rem 0.9rem; font-size: 0.9rem; cursor: pointer;
+  }
+  button.danger { background: var(--red); color: white; border: none; }
+
+  .row { display: flex; gap: 0.6rem; }
+  .row > * { flex: 1; }
+  .hint { font-size: 0.78rem; color: var(--muted); margin-top: 0.3rem; }
+  .error-box { background: #3a1a1a; border: 1px solid var(--red); color: #fca5a5; border-radius: 8px; padding: 0.75rem; margin-top: 0.75rem; font-size: 0.85rem; }
+
+  /* ── Run view ─────────────────────────────────────────────── */
+  .camera-wrap { position: relative; background: #000; border-radius: 12px; overflow: hidden; aspect-ratio: 3/4; }
+  video { width: 100%; height: 100%; object-fit: cover; display: block; }
+
+  .status-banner {
+    position: absolute; inset: auto 0 0 0; padding: 1rem; text-align: center;
+    font-size: 1.4rem; font-weight: 700; color: white; letter-spacing: 0.04em;
+    background: rgba(0,0,0,0.55); transition: background-color 120ms ease;
+  }
+  .status-banner.armed { background: rgba(0,0,0,0.55); }
+  .status-banner.scanning { background: rgba(234,179,8,0.75); }
+  .status-banner.keeper { background: rgba(34,197,94,0.85); }
+  .status-banner.bulk { background: rgba(239,68,68,0.85); }
+  .status-banner.stalled { background: rgba(239,68,68,0.95); }
+
+  .phase-badge {
+    position: absolute; top: 0.6rem; left: 0.6rem; background: rgba(0,0,0,0.6); color: var(--yellow);
+    font-size: 0.7rem; font-weight: 600; padding: 0.25rem 0.5rem; border-radius: 6px;
+  }
+
+  .counters { display: flex; gap: 0.6rem; margin-top: 1rem; }
+  .counter { flex: 1; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 0.7rem; text-align: center; }
+  .counter .n { font-size: 1.4rem; font-weight: 700; }
+  .counter .l { font-size: 0.72rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.03em; }
+
+  .last-card { margin-top: 0.9rem; padding: 0.7rem; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; font-size: 0.85rem; }
+  .last-card .name { font-weight: 600; }
+  .last-card .meta { color: var(--muted); font-size: 0.78rem; margin-top: 0.15rem; }
+
+  .run-actions { display: flex; gap: 0.6rem; margin-top: 1rem; }
+  .run-actions button { flex: 1; }
+
+  .stall-banner { margin-top: 1rem; padding: 0.9rem; background: #3a1a1a; border: 1px solid var(--red); border-radius: 10px; }
+  .stall-banner p { font-size: 0.85rem; margin-bottom: 0.6rem; }
+
+  ul.results { list-style: none; margin-top: 1rem; }
+  ul.results li { padding: 0.6rem 0; border-bottom: 1px solid var(--border); font-size: 0.85rem; display: flex; justify-content: space-between; gap: 0.5rem; }
+  ul.results li .tag { font-size: 0.7rem; padding: 0.1rem 0.4rem; border-radius: 4px; }
+  ul.results li .tag.keeper { background: rgba(34,197,94,0.2); color: var(--green); }
+  ul.results li .tag.bulk { background: rgba(239,68,68,0.2); color: var(--red); }
+
+  details summary { cursor: pointer; color: var(--muted); font-size: 0.85rem; margin-top: 1rem; }
+  .csv-links { display: flex; gap: 0.6rem; margin-top: 1rem; }
+  .csv-links a { flex: 1; text-align: center; background: var(--surface2); border: 1px solid var(--border); color: var(--text); border-radius: 8px; padding: 0.7rem; text-decoration: none; font-size: 0.85rem; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Card Sorter</h1>
+  <nav>
+    <button data-view="setup" class="active">Setup</button>
+    <button data-view="run">Run</button>
+    <button data-view="search">Search</button>
+    <button data-view="settings">Settings</button>
+  </nav>
+</header>
+
+<main>
+
+  <!-- ══════════════════════ SETUP ══════════════════════ -->
+  <section id="view-setup">
+    <label for="game-select">Game</label>
+    <select id="game-select"></select>
+
+    <label for="set-select">Sets — optional, none = whole game (plan Decision #10)</label>
+    <select id="set-select" multiple></select>
+    <p class="hint">Select the set(s) you're sorting for the tightest recognition accuracy. Leave nothing selected to scan against the whole game.</p>
+
+    <div class="row">
+      <div>
+        <label for="variant-select">Variant</label>
+        <select id="variant-select"></select>
+      </div>
+      <div>
+        <label for="condition-select">Assumed condition</label>
+        <select id="condition-select"></select>
+      </div>
+    </div>
+    <p class="hint">The app can't detect foil or condition from the photo — pre-split your pile by variant before running, and declare it here (see plan Decision #4).</p>
+
+    <div class="row">
+      <div>
+        <label for="threshold-input">Keeper threshold ($)</label>
+        <input type="number" id="threshold-input" step="0.01" min="0" />
+      </div>
+      <div>
+        <label for="location-input">TCGTracking location</label>
+        <input type="text" id="location-input" placeholder="e.g. A-1-A" />
+      </div>
+    </div>
+
+    <details>
+      <summary>Advanced — confidence thresholds</summary>
+      <div class="row">
+        <div>
+          <label for="min-score-input">Min score</label>
+          <input type="number" id="min-score-input" min="0" max="100" />
+        </div>
+        <div>
+          <label for="min-gap-input">Min gap to runner-up</label>
+          <input type="number" id="min-gap-input" min="0" max="100" />
+        </div>
+      </div>
+      <p class="hint">Any card below either threshold routes to bulk with a searchable record (Decision #2/#9). Tune these from a dry run's manifest.csv.</p>
+    </details>
+
+    <div id="setup-error"></div>
+    <button class="primary" id="start-run-btn">Start Run</button>
+  </section>
+
+  <!-- ══════════════════════ RUN ══════════════════════ -->
+  <section id="view-run" hidden>
+    <div class="camera-wrap">
+      <video id="camera" playsinline autoplay muted></video>
+      <div class="phase-badge">Phase 1 — visual only, no tone</div>
+      <div class="status-banner armed" id="status-banner">ARMED</div>
+    </div>
+
+    <div class="counters">
+      <div class="counter"><div class="n" id="count-total">0</div><div class="l">Cards</div></div>
+      <div class="counter"><div class="n" id="count-keeper">0</div><div class="l">Keepers</div></div>
+      <div class="counter"><div class="n" id="count-bulk">0</div><div class="l">Bulk</div></div>
+      <div class="counter"><div class="n" id="box-label">—</div><div class="l">Bulk box</div></div>
+    </div>
+
+    <div class="last-card" id="last-card" hidden>
+      <div class="name" id="last-card-name"></div>
+      <div class="meta" id="last-card-meta"></div>
+    </div>
+
+    <div class="stall-banner" id="stall-banner" hidden>
+      <p><strong>Stalled.</strong> TCGTracking didn't respond after retries — the machine should still be holding this card, waiting for a tone that hasn't been sent. Fix your connection, then retry.</p>
+      <button class="secondary" id="retry-scan-btn" style="width:100%">Retry scan</button>
+    </div>
+
+    <div class="run-actions">
+      <button class="secondary" id="new-box-btn">New bulk box</button>
+      <button class="secondary danger" id="finish-run-btn">Finish run</button>
+    </div>
+
+    <details open>
+      <summary>Recent cards</summary>
+      <ul class="results" id="results-list"></ul>
+    </details>
+  </section>
+
+  <!-- ══════════════════════ SUMMARY ══════════════════════ -->
+  <section id="view-summary" hidden>
+    <h2 id="summary-heading">Run complete</h2>
+    <div class="counters">
+      <div class="counter"><div class="n" id="summary-total">0</div><div class="l">Cards</div></div>
+      <div class="counter"><div class="n" id="summary-keeper">0</div><div class="l">Keepers</div></div>
+      <div class="counter"><div class="n" id="summary-bulk">0</div><div class="l">Bulk</div></div>
+    </div>
+    <div class="csv-links">
+      <a id="export-link" href="#">Download keepers.csv</a>
+      <a id="manifest-link" href="#">Download manifest.csv</a>
+    </div>
+    <p class="hint">manifest.csv has every card + score + runner-up score — use it to set Min score / Min gap before your next run.</p>
+    <div id="excluded-warning" class="error-box" hidden></div>
+  </section>
+
+  <!-- ══════════════════════ SEARCH ══════════════════════ -->
+  <section id="view-search" hidden>
+    <label for="search-input">Find a bulked card — which box is it in?</label>
+    <div class="row">
+      <input type="text" id="search-input" placeholder="Card name…" />
+      <button class="secondary" id="search-btn" style="flex: 0 0 auto;">Search</button>
+    </div>
+    <ul class="results" id="search-results"></ul>
+  </section>
+
+  <!-- ══════════════════════ SETTINGS ══════════════════════ -->
+  <section id="view-settings" hidden>
+    <p class="hint">Raw settings JSON — includes the CSV column mapping (Decision #8). A nicer editor is Phase 3; for now edit the JSON directly.</p>
+    <textarea id="settings-json"></textarea>
+    <div class="row" style="margin-top:0.75rem;">
+      <button class="secondary" id="settings-reload-btn">Reload</button>
+      <button class="secondary" id="settings-save-btn">Save</button>
+    </div>
+    <div id="settings-status" class="hint"></div>
+  </section>
+
+</main>
+
+<script>
+(function () {
+  'use strict';
+
+  // ── tiny router ──────────────────────────────────────────────
+  const views = ['setup', 'run', 'search', 'settings', 'summary'];
+  function showView(name) {
+    views.forEach((v) => {
+      const el = document.getElementById('view-' + v);
+      if (el) el.hidden = v !== name;
+    });
+    document.querySelectorAll('header nav button').forEach((b) => {
+      b.classList.toggle('active', b.dataset.view === name);
+    });
+  }
+  document.querySelectorAll('header nav button').forEach((b) => {
+    b.addEventListener('click', () => showView(b.dataset.view));
+  });
+
+  // ── shared state ─────────────────────────────────────────────
+  let appSettings = null;
+  let session = null; // { id, gameId, gameName, setIds, variant, condition, thresholdCents, location, ... }
+  let counts = { total: 0, keeper: 0, bulk: 0 };
+  let currentBoxLabel = '—';
+
+  const $ = (id) => document.getElementById(id);
+
+  async function api(path, opts) {
+    const res = await fetch(path, opts);
+    let body = null;
+    try { body = await res.json(); } catch (e) { /* no body */ }
+    if (!res.ok) {
+      const err = new Error((body && body.error) || (res.status + ' ' + res.statusText));
+      err.status = res.status;
+      err.body = body;
+      throw err;
+    }
+    return body;
+  }
+
+  // ═══════════════════════ SETUP ═══════════════════════════════
+
+  async function loadSetup() {
+    appSettings = await api('/api/settings');
+    $('threshold-input').value = (appSettings.defaultThresholdCents / 100).toFixed(2);
+    $('min-score-input').value = appSettings.minScore;
+    $('min-gap-input').value = appSettings.minGap;
+
+    const games = await api('/api/games');
+    const gameSelect = $('game-select');
+    gameSelect.innerHTML = games.map((g) => `<option value="${g.id}" data-name="${g.display_name}">${g.display_name}</option>`).join('');
+    await onGameChange();
+  }
+
+  async function onGameChange() {
+    const gameId = Number($('game-select').value);
+    const sets = await api('/api/sets?game_id=' + gameId);
+    const setSelect = $('set-select');
+    setSelect.innerHTML = sets.map((s) => `<option value="${s.id}">${s.name}${s.abbreviation ? ' (' + s.abbreviation + ')' : ''}</option>`).join('');
+    await refreshVariants();
+  }
+
+  /** Variant vocab is sampled from one card, not hardcoded (plan: "sku_dimensions ships per
+   *  product ... variant dropdown can be populated dynamically per game"). Uses the first
+   *  selected set, or the first set in the whole list if none are selected yet. */
+  async function refreshVariants() {
+    const gameId = Number($('game-select').value);
+    const setSelect = $('set-select');
+    const selected = Array.from(setSelect.selectedOptions).map((o) => Number(o.value));
+    const sampleSetId = selected[0] ?? Number(setSelect.options[0]?.value);
+    if (!sampleSetId) return;
+
+    try {
+      const { variants, conditions } = await api(`/api/variants?game_id=${gameId}&set_id=${sampleSetId}`);
+      $('variant-select').innerHTML = variants.map((v) => `<option value="${v}">${v}</option>`).join('');
+      $('condition-select').innerHTML = conditions.map((c) => `<option value="${c}" ${c === appSettings.defaultCondition ? 'selected' : ''}>${c}</option>`).join('');
+    } catch (err) {
+      $('setup-error').innerHTML = `<div class="error-box">Couldn't load variants: ${err.message}</div>`;
+    }
+  }
+
+  $('game-select').addEventListener('change', onGameChange);
+  $('set-select').addEventListener('change', refreshVariants);
+
+  $('start-run-btn').addEventListener('click', async () => {
+    $('setup-error').innerHTML = '';
+    const gameSelect = $('game-select');
+    const gameOpt = gameSelect.options[gameSelect.selectedIndex];
+    const setIds = Array.from($('set-select').selectedOptions).map((o) => Number(o.value));
+    const location = $('location-input').value.trim();
+
+    if (!location) {
+      $('setup-error').innerHTML = '<div class="error-box">Location is required — this is stamped into every keeper row on export.</div>';
+      return;
+    }
+
+    const body = {
+      gameId: Number(gameSelect.value),
+      gameName: gameOpt.dataset.name,
+      setIds,
+      variant: $('variant-select').value,
+      condition: $('condition-select').value,
+      thresholdCents: Math.round(parseFloat($('threshold-input').value || '0') * 100),
+      minScore: Number($('min-score-input').value),
+      minGap: Number($('min-gap-input').value),
+      location,
+    };
+
+    try {
+      session = await api('/api/session', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      sessionStorage.setItem('cardSorterSessionId', session.id);
+      counts = { total: 0, keeper: 0, bulk: 0 };
+      showView('run');
+      await startRun();
+    } catch (err) {
+      $('setup-error').innerHTML = `<div class="error-box">${err.message}</div>`;
+    }
+  });
+
+  // ═══════════════════════ RUN ══════════════════════════════════
+
+  // Client-side capture/decision state machine — see plan "Client state machine":
+  // IDLE -> ARMED -> CHANGING -> STABLE -> SCANNING -> DECIDED -> WAIT_CLEAR -> ARMED, + STALLED.
+  // ARMED/WAIT_CLEAR both watch for frame-diff; the difference is only which transition a
+  // detected change leads to (a new card arriving vs. the just-decided card being routed away).
+  const S = { IDLE: 'idle', ARMED: 'armed', CHANGING: 'changing', SCANNING: 'scanning', WAIT_CLEAR: 'wait_clear', STALLED: 'stalled', DONE: 'done' };
+  let state = S.IDLE;
+  let stream = null;
+  let loopTimer = null;
+  let prevGray = null;      // Uint8ClampedArray from the last diff-canvas sample
+  let stableCount = 0;
+  let lastActivityAt = 0;   // resets the hopper-empty timer whenever something is happening
+  let lastCaptureBlob = null;
+
+  const video = $('camera');
+  const diffCanvas = document.createElement('canvas');
+  diffCanvas.width = 64; diffCanvas.height = 48;
+  const diffCtx = diffCanvas.getContext('2d', { willReadFrequently: true });
+  const captureCanvas = document.createElement('canvas');
+  const captureCtx = captureCanvas.getContext('2d');
+
+  function setBanner(cls, text) {
+    const b = $('status-banner');
+    b.className = 'status-banner ' + cls;
+    b.textContent = text;
+  }
+
+  /** Phase 1 stub — see plan's "Audio interface (Phase 2 seam)". The visual flash on the
+   *  banner IS the signal for now; Phase 2 swaps this for real Web Audio tones driving the
+   *  X1PRO, without touching anything in the state machine above it. */
+  const ToneEmitter = {
+    async emit(decision) {
+      setBanner(decision, decision === 'keeper' ? 'KEEPER' : 'BULK');
+      await new Promise((r) => setTimeout(r, 700));
+    },
+  };
+
+  async function startRun() {
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' } }, audio: false });
+    } catch (err) {
+      setBanner('stalled', 'CAMERA ERROR');
+      $('stall-banner').hidden = false;
+      $('stall-banner').querySelector('p').textContent =
+        'Camera access failed: ' + err.message + '. getUserMedia needs a secure context — open this over HTTPS (Railway deploy) or on localhost.';
+      return;
+    }
+    video.srcObject = stream;
+    await video.play();
+
+    state = S.ARMED;
+    lastActivityAt = Date.now();
+    prevGray = null;
+    setBanner('armed', 'ARMED');
+    updateCounters();
+    loopTimer = setInterval(tick, appSettings.captureIntervalMs);
+  }
+
+  function sampleGray() {
+    diffCtx.drawImage(video, 0, 0, diffCanvas.width, diffCanvas.height);
+    const data = diffCtx.getImageData(0, 0, diffCanvas.width, diffCanvas.height).data;
+    const gray = new Uint8ClampedArray(diffCanvas.width * diffCanvas.height);
+    for (let i = 0, p = 0; i < data.length; i += 4, p++) {
+      gray[p] = (data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114) | 0;
+    }
+    return gray;
+  }
+
+  function meanAbsDiff(a, b) {
+    let sum = 0;
+    for (let i = 0; i < a.length; i++) sum += Math.abs(a[i] - b[i]);
+    return sum / a.length;
+  }
+
+  function tick() {
+    if (state === S.SCANNING || state === S.DONE) return;
+    if (!video.videoWidth) return;
+
+    const gray = sampleGray();
+    const diff = prevGray ? meanAbsDiff(gray, prevGray) : 0;
+    prevGray = gray;
+    const changed = diff > appSettings.frameDiffThreshold;
+
+    if (state === S.ARMED) {
+      if (changed) {
+        state = S.CHANGING;
+        stableCount = 0;
+        lastActivityAt = Date.now();
+      } else if (Date.now() - lastActivityAt > appSettings.hopperEmptyTimeoutMs) {
+        finishRun(true);
+      }
+      return;
+    }
+
+    if (state === S.CHANGING) {
+      lastActivityAt = Date.now();
+      if (changed) { stableCount = 0; return; }
+      stableCount++;
+      if (stableCount >= appSettings.stableFrames) triggerCapture();
+      return;
+    }
+
+    if (state === S.WAIT_CLEAR) {
+      if (changed) { state = S.ARMED; lastActivityAt = Date.now(); }
+      return;
+    }
+  }
+
+  function triggerCapture() {
+    state = S.SCANNING;
+    setBanner('scanning', 'SCANNING…');
+
+    const w = Math.min(video.videoWidth, 640);
+    const h = Math.round(w * (video.videoHeight / video.videoWidth));
+    captureCanvas.width = w; captureCanvas.height = h;
+    captureCtx.drawImage(video, 0, 0, w, h);
+    captureCanvas.toBlob((blob) => {
+      lastCaptureBlob = blob;
+      submitScan(blob);
+    }, 'image/jpeg', 0.8);
+  }
+
+  async function submitScan(blob) {
+    const form = new FormData();
+    form.append('image', blob, 'capture.jpg');
+    try {
+      const result = await api('/api/session/' + session.id + '/scan', { method: 'POST', body: form });
+      $('stall-banner').hidden = true;
+      await ToneEmitter.emit(result.decision);
+      recordResult(result);
+      state = S.WAIT_CLEAR;
+      setBanner('armed', 'ARMED');
+    } catch (err) {
+      // Any scan failure (documented 503 stall, or anything else) pauses rather than guesses —
+      // see plan Decision #12. The card is still sitting on the machine holding for a tone.
+      state = S.STALLED;
+      setBanner('stalled', 'STALLED');
+      $('stall-banner').hidden = false;
+      $('stall-banner').querySelector('p').textContent =
+        'Scan failed: ' + err.message + ' — the machine should still be holding this card. Fix your connection, then retry.';
+    }
+  }
+
+  $('retry-scan-btn').addEventListener('click', async () => {
+    if (!lastCaptureBlob) return;
+    try { await api('/api/session/' + session.id + '/resume', { method: 'POST' }); } catch (e) { /* best effort */ }
+    setBanner('scanning', 'SCANNING…');
+    await submitScan(lastCaptureBlob);
+  });
+
+  function recordResult(result) {
+    counts.total++;
+    counts[result.decision]++;
+    updateCounters();
+
+    const card = result.card;
+    $('last-card').hidden = false;
+    $('last-card-name').textContent = card.name || '(unrecognized)';
+    const price = card.priceCents != null ? '$' + (card.priceCents / 100).toFixed(2) : 'no price';
+    $('last-card-meta').textContent = `${result.decision.toUpperCase()} · ${result.reason} · score ${card.score ?? '—'} · ${price}`;
+
+    const li = document.createElement('li');
+    li.innerHTML = `<span>${card.name || '(unrecognized)'}</span><span class="tag ${result.decision}">${result.decision}</span>`;
+    $('results-list').prepend(li);
+  }
+
+  function updateCounters() {
+    $('count-total').textContent = counts.total;
+    $('count-keeper').textContent = counts.keeper;
+    $('count-bulk').textContent = counts.bulk;
+    $('box-label').textContent = currentBoxLabel;
+  }
+
+  $('new-box-btn').addEventListener('click', async () => {
+    if (!session) return;
+    const box = await api('/api/session/' + session.id + '/bulk-box', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+    currentBoxLabel = box.label;
+    updateCounters();
+  });
+
+  $('finish-run-btn').addEventListener('click', () => finishRun(false));
+
+  async function finishRun(auto) {
+    if (state === S.DONE) return;
+    state = S.DONE;
+    clearInterval(loopTimer);
+    if (stream) stream.getTracks().forEach((t) => t.stop());
+    if (session) {
+      try { await api('/api/session/' + session.id + '/complete', { method: 'POST' }); } catch (e) { /* best effort */ }
+    }
+    $('summary-heading').textContent = auto ? 'Run complete — hopper looks empty' : 'Run complete';
+    $('summary-total').textContent = counts.total;
+    $('summary-keeper').textContent = counts.keeper;
+    $('summary-bulk').textContent = counts.bulk;
+    $('export-link').href = '/api/session/' + session.id + '/export.csv';
+    $('manifest-link').href = '/api/session/' + session.id + '/manifest.csv';
+    showView('summary');
+    await checkExcludedKeepers();
+  }
+
+  /** Keepers priced via a fallback SKU (declared variant doesn't exist for that card — e.g.
+   *  an ex/full-art pulled into a "Normal" run, see export.ts) are dropped from export.csv
+   *  rather than exported with a blank id. Surface that here so it's not a silent gap. */
+  async function checkExcludedKeepers() {
+    try {
+      const detail = await api('/api/session/' + session.id);
+      const missing = detail.cards.filter((c) => c.decision === 'keeper' && c.skuId == null);
+      const box = $('excluded-warning');
+      if (missing.length === 0) { box.hidden = true; return; }
+      box.hidden = false;
+      box.innerHTML = `<strong>${missing.length} keeper${missing.length === 1 ? '' : 's'} left out of keepers.csv</strong> — ` +
+        `no SKU exists for the declared variant "${session.variant}" on: ` +
+        missing.map((c) => c.name || '(unrecognized)').join(', ') +
+        `. Add these to TCGTracking by hand.`;
+    } catch (err) { /* non-critical — summary still works without this */ }
+  }
+
+  // ═══════════════════════ SEARCH ════════════════════════════════
+
+  $('search-btn').addEventListener('click', runSearch);
+  $('search-input').addEventListener('keydown', (e) => { if (e.key === 'Enter') runSearch(); });
+
+  async function runSearch() {
+    const q = $('search-input').value.trim();
+    if (!q) return;
+    const results = await api('/api/search?q=' + encodeURIComponent(q));
+    const list = $('search-results');
+    list.innerHTML = '';
+    if (results.length === 0) {
+      list.innerHTML = '<li>No bulked cards match.</li>';
+      return;
+    }
+    for (const r of results) {
+      const li = document.createElement('li');
+      const when = new Date(r.card.scannedAt).toLocaleString();
+      li.innerHTML = `<span>${r.card.name || '(unrecognized)'} — ${r.gameName}<br><span class="hint">${when}</span></span><span class="tag bulk">${r.bulkBoxLabel || 'no box'}</span>`;
+      list.appendChild(li);
+    }
+  }
+
+  // ═══════════════════════ SETTINGS ══════════════════════════════
+
+  async function loadSettingsView() {
+    const s = await api('/api/settings');
+    $('settings-json').value = JSON.stringify(s, null, 2);
+    $('settings-status').textContent = '';
+  }
+  $('settings-reload-btn').addEventListener('click', loadSettingsView);
+  $('settings-save-btn').addEventListener('click', async () => {
+    try {
+      const parsed = JSON.parse($('settings-json').value);
+      await api('/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(parsed) });
+      appSettings = parsed;
+      $('settings-status').textContent = 'Saved.';
+    } catch (err) {
+      $('settings-status').textContent = 'Error: ' + err.message;
+    }
+  });
+
+  document.querySelector('[data-view="settings"]').addEventListener('click', loadSettingsView);
+
+  // ═══════════════════════ boot ══════════════════════════════════
+
+  loadSetup().catch((err) => {
+    $('setup-error').innerHTML = `<div class="error-box">Failed to load setup data: ${err.message}</div>`;
+  });
+})();
+</script>
+</body>
+</html>

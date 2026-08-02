@@ -1,0 +1,32 @@
+{
+  "minScore": 70,
+  "minGap": 10,
+  "defaultThresholdCents": 50,
+  "defaultCondition": "Near Mint",
+  "captureIntervalMs": 200,
+  "stableFrames": 3,
+  "frameDiffThreshold": 12,
+  "hopperEmptyTimeoutMs": 8000,
+  "scanMaxRetries": 3,
+  "scanRetryBackoffMs": 1000,
+  "cacheTtlHours": 168,
+  "csvColumns": [
+    { "header": "TCGplayer Id", "field": "skuId" },
+    { "header": "Product Line", "field": "productLine" },
+    { "header": "Set Name", "field": "setName" },
+    { "header": "Product Name", "field": "productName" },
+    { "header": "Title", "field": "" },
+    { "header": "Number", "field": "number" },
+    { "header": "Rarity", "field": "rarity" },
+    { "header": "Condition", "field": "condition" },
+    { "header": "TCG Market Price", "field": "marketPrice" },
+    { "header": "TCG Direct Low", "field": "" },
+    { "header": "TCG Low Price With Shipping", "field": "" },
+    { "header": "TCG Low Price", "field": "lowPrice" },
+    { "header": "Total Quantity", "field": "" },
+    { "header": "Add to Quantity", "field": "quantity" },
+    { "header": "TCG Marketplace Price", "field": "marketPrice" },
+    { "header": "Photo URL", "field": "photoUrl" },
+    { "header": "Location", "field": "location" }
+  ]
+}
