@@ -31,9 +31,21 @@ function requireSession(req: express.Request, res: express.Response) {
 
 // ---- catalog browsing (game/set/variant pickers on the setup screen) ----
 
+// The physical sort only ever covers these 5 TCGs — TCGTracking's /categories returns ~90
+// (sleeves, playmats, storage albums, etc. included), which would swamp a one-handed mobile
+// picker. IDs (not name matching) so a display-name change on TCGTracking's side can't
+// silently drop or add a game; confirmed live via `scripts/calibrate.ts --list-sets` (2026-08-04).
+// Order here is the dropdown order.
+const ALLOWED_GAME_IDS = [71, 63, 3, 1, 68]; // Disney Lorcana, Digimon Card Game, Pokemon, Magic: The Gathering, One Piece Card Game
+
 app.get('/api/games', async (_req, res) => {
   try {
-    res.json(await fetchCategories());
+    const categories = await fetchCategories();
+    const allowed = ALLOWED_GAME_IDS.map((id) => categories.find((c) => c.id === id)).filter((c): c is NonNullable<typeof c> => !!c);
+    if (allowed.length < ALLOWED_GAME_IDS.length) {
+      console.warn(`[games] only resolved ${allowed.length}/${ALLOWED_GAME_IDS.length} allowed game ids — TCGTracking may have renumbered a category`);
+    }
+    res.json(allowed);
   } catch (err) {
     console.error('[games]', err);
     res.status(502).json({ error: 'Failed to reach TCGTracking.' });
