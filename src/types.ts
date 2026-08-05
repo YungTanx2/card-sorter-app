@@ -147,4 +147,14 @@ export interface AppSettings {
   scanRetryBackoffMs: number;
   cacheTtlHours: number;
   csvColumns: CsvColumnMapping[];
+  /**
+   * Client-side capture crop, as two slider values the frontend maps to a crop rectangle
+   * (see public/index.html's getCrop()) — NOT raw fractions, so the crop math lives in one
+   * place. Default 100/51 reproduces the exact crop validated in the 2026-08-04 calibration
+   * run (scripts/calibrate.ts): full uncropped frames scored 0/3 correct against real
+   * TCGTracking /scan calls, cropped-to-card scored 2/3 with a clean score/gap separation.
+   * The server never interprets these — it only stores/returns them like any other setting.
+   */
+  captureCropZoomPct: number; // 100 = the validated default crop; sliders run roughly 50-150
+  captureCropVPosPct: number; // 0 = crop touches top of frame, 100 = touches bottom
 }

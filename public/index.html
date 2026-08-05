@@ -95,6 +95,17 @@
     font-size: 0.7rem; font-weight: 600; padding: 0.25rem 0.5rem; border-radius: 6px;
   }
 
+  /* The crop guide box-shadow trick dims everything OUTSIDE the rectangle (a 9999px spread
+     acts as an inverted mask) so the capture window reads as a window, not just an outline —
+     this is what only a real card being physically inside it should look "selected". */
+  .crop-guide {
+    position: absolute; border: 2px dashed var(--accent); border-radius: 8px;
+    pointer-events: none; box-shadow: 0 0 0 9999px rgba(0,0,0,0.45);
+  }
+
+  input[type=range] { width: 100%; accent-color: var(--accent); }
+  .slider-value { color: var(--text); font-weight: 600; }
+
   .counters { display: flex; gap: 0.6rem; margin-top: 1rem; }
   .counter { flex: 1; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 0.7rem; text-align: center; }
   .counter .n { font-size: 1.4rem; font-weight: 700; }
@@ -127,6 +138,7 @@
   <h1>Card Sorter</h1>
   <nav>
     <button data-view="setup" class="active">Setup</button>
+    <button data-view="calibrate">Calibrate</button>
     <button data-view="run">Run</button>
     <button data-view="search">Search</button>
     <button data-view="settings">Settings</button>
@@ -137,6 +149,8 @@
 
   <!-- ══════════════════════ SETUP ══════════════════════ -->
   <section id="view-setup">
+    <p class="hint">Before your first run on a new mount, open <strong>Calibrate</strong> to align the capture window to where the card actually lands in frame — an uncropped frame recognized 0/3 real cards in testing; a cropped one recognized 2/3.</p>
+
     <label for="game-select">Game</label>
     <select id="game-select"></select>
 
@@ -186,10 +200,33 @@
     <button class="primary" id="start-run-btn">Start Run</button>
   </section>
 
+  <!-- ══════════════════════ CALIBRATE ══════════════════════ -->
+  <section id="view-calibrate" hidden>
+    <p class="hint">Aligns the capture window to where the card sits in your fixed mount — a one-time setup per rig, not per run. Every capture is cropped to this box before it's sent for recognition.</p>
+    <div class="camera-wrap">
+      <video id="calib-camera" playsinline autoplay muted></video>
+      <div class="crop-guide" id="calib-crop-guide"></div>
+    </div>
+
+    <label for="crop-size-slider">Capture window size — <span class="slider-value" id="crop-size-value"></span></label>
+    <input type="range" id="crop-size-slider" min="50" max="150" step="1" />
+
+    <label for="crop-vpos-slider">Vertical position — <span class="slider-value" id="crop-vpos-value"></span></label>
+    <input type="range" id="crop-vpos-slider" min="0" max="100" step="1" />
+    <p class="hint">Adjust until a card placed in the holder fills the dashed box, then Save. The box is always centered left-to-right.</p>
+
+    <div class="row" style="margin-top:1rem;">
+      <button class="secondary" id="calib-stop-btn">Stop camera</button>
+      <button class="primary" id="calib-save-btn" style="margin-top:0;">Save crop</button>
+    </div>
+    <div id="calib-status" class="hint"></div>
+  </section>
+
   <!-- ══════════════════════ RUN ══════════════════════ -->
   <section id="view-run" hidden>
     <div class="camera-wrap">
       <video id="camera" playsinline autoplay muted></video>
+      <div class="crop-guide" id="run-crop-guide"></div>
       <div class="phase-badge">Phase 1 — visual only, no tone</div>
       <div class="status-banner armed" id="status-banner">ARMED</div>
     </div>
@@ -266,8 +303,13 @@
   'use strict';
 
   // ── tiny router ──────────────────────────────────────────────
-  const views = ['setup', 'run', 'search', 'settings', 'summary'];
+  const views = ['setup', 'calibrate', 'run', 'search', 'settings', 'summary'];
+  let currentViewName = 'setup';
   function showView(name) {
+    // Calibrate is the only view holding a camera stream that isn't the active run — release
+    // it on the way out rather than leaving a hidden tab pinning the camera in the background.
+    if (currentViewName === 'calibrate' && name !== 'calibrate') stopCalibCamera();
+    currentViewName = name;
     views.forEach((v) => {
       const el = document.getElementById('view-' + v);
       if (el) el.hidden = v !== name;
@@ -282,11 +324,61 @@
 
   // ── shared state ─────────────────────────────────────────────
   let appSettings = null;
+  let currentCrop = null; // { left, top, width, height } fractions of the video frame — see getCrop()
   let session = null; // { id, gameId, gameName, setIds, variant, condition, thresholdCents, location, ... }
   let counts = { total: 0, keeper: 0, bulk: 0 };
   let currentBoxLabel = '—';
 
   const $ = (id) => document.getElementById(id);
+
+  /** Every place appSettings changes (initial load, Calibrate save, raw Settings save) must
+   *  recompute currentCrop through here, so the Run guide and capture crop never drift from
+   *  what was actually saved. */
+  function applySettings(s) {
+    appSettings = s;
+    currentCrop = getCrop(appSettings);
+  }
+
+  // ═══════════════════════ CROP GEOMETRY ═══════════════════════════════
+
+  // Base crop, as fractions of the frame — the exact box validated in the 2026-08-04
+  // calibration run (scripts/calibrate.ts): full frame scored 0/3 correct against real
+  // TCGTracking /scan calls, this crop scored 2/3 with a clean score/gap separation from wrong
+  // matches. captureCropZoomPct=100 reproduces it exactly; sliders scale/reposition from here.
+  const BASE_CROP_W = 0.58;
+  const BASE_CROP_H = 0.47;
+  const clamp = (n, lo, hi) => Math.min(hi, Math.max(lo, n));
+
+  /** Maps the two persisted slider values to an absolute crop rectangle. Box is always
+   *  horizontally centered (matches every sample photo — the rig points straight down at a
+   *  centered card holder); only size (zoom) and vertical position are adjustable. */
+  function getCrop(settings) {
+    const scale = settings.captureCropZoomPct / 100;
+    const width = clamp(BASE_CROP_W * scale, 0.15, 0.95);
+    const height = clamp(BASE_CROP_H * scale, 0.15, 0.95);
+    const top = (settings.captureCropVPosPct / 100) * (1 - height);
+    const left = (1 - width) / 2;
+    return { left, top, width, height };
+  }
+
+  function renderCropGuide(el, crop) {
+    el.style.left = (crop.left * 100) + '%';
+    el.style.top = (crop.top * 100) + '%';
+    el.style.width = (crop.width * 100) + '%';
+    el.style.height = (crop.height * 100) + '%';
+  }
+
+  /** Converts a fractional crop into the video element's native pixel coordinates — needed
+   *  because getUserMedia's actual resolution isn't known until the stream is playing, so the
+   *  crop can't be baked in as pixels ahead of time. */
+  function cropRectPx(videoWidth, videoHeight, crop) {
+    return {
+      sx: Math.round(crop.left * videoWidth),
+      sy: Math.round(crop.top * videoHeight),
+      sw: Math.round(crop.width * videoWidth),
+      sh: Math.round(crop.height * videoHeight),
+    };
+  }
 
   async function api(path, opts) {
     const res = await fetch(path, opts);
@@ -304,7 +396,7 @@
   // ═══════════════════════ SETUP ═══════════════════════════════
 
   async function loadSetup() {
-    appSettings = await api('/api/settings');
+    applySettings(await api('/api/settings'));
     $('threshold-input').value = (appSettings.defaultThresholdCents / 100).toFixed(2);
     $('min-score-input').value = appSettings.minScore;
     $('min-gap-input').value = appSettings.minGap;
@@ -380,6 +472,58 @@
     }
   });
 
+  // ═══════════════════════ CALIBRATE ═══════════════════════════════
+
+  let calibStream = null;
+
+  async function startCalibCamera() {
+    $('calib-status').textContent = '';
+    try {
+      calibStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' } }, audio: false });
+    } catch (err) {
+      $('calib-status').textContent = 'Camera access failed: ' + err.message + '. Needs a secure context (HTTPS or localhost).';
+      return;
+    }
+    $('calib-camera').srcObject = calibStream;
+    await $('calib-camera').play();
+  }
+
+  function stopCalibCamera() {
+    if (calibStream) { calibStream.getTracks().forEach((t) => t.stop()); calibStream = null; }
+  }
+
+  function updateCalibPreview() {
+    const zoom = Number($('crop-size-slider').value);
+    const vpos = Number($('crop-vpos-slider').value);
+    $('crop-size-value').textContent = zoom + '%';
+    $('crop-vpos-value').textContent = vpos + '%';
+    renderCropGuide($('calib-crop-guide'), getCrop({ captureCropZoomPct: zoom, captureCropVPosPct: vpos }));
+  }
+
+  $('crop-size-slider').addEventListener('input', updateCalibPreview);
+  $('crop-vpos-slider').addEventListener('input', updateCalibPreview);
+  $('calib-stop-btn').addEventListener('click', stopCalibCamera);
+
+  $('calib-save-btn').addEventListener('click', async () => {
+    const patch = {
+      captureCropZoomPct: Number($('crop-size-slider').value),
+      captureCropVPosPct: Number($('crop-vpos-slider').value),
+    };
+    try {
+      applySettings(await api('/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch) }));
+      $('calib-status').textContent = 'Saved — every capture will use this crop from now on.';
+    } catch (err) {
+      $('calib-status').textContent = 'Error: ' + err.message;
+    }
+  });
+
+  document.querySelector('[data-view="calibrate"]').addEventListener('click', () => {
+    $('crop-size-slider').value = appSettings.captureCropZoomPct;
+    $('crop-vpos-slider').value = appSettings.captureCropVPosPct;
+    updateCalibPreview();
+    startCalibCamera();
+  });
+
   // ═══════════════════════ RUN ══════════════════════════════════
 
   // Client-side capture/decision state machine — see plan "Client state machine":
@@ -430,6 +574,7 @@
     }
     video.srcObject = stream;
     await video.play();
+    renderCropGuide($('run-crop-guide'), currentCrop);
 
     state = S.ARMED;
     lastActivityAt = Date.now();
@@ -440,7 +585,10 @@
   }
 
   function sampleGray() {
-    diffCtx.drawImage(video, 0, 0, diffCanvas.width, diffCanvas.height);
+    // Diff only inside the crop — see plan/calibration finding: motion outside the capture
+    // window (bin walls, hands passing by) isn't a card arriving and shouldn't arm a capture.
+    const { sx, sy, sw, sh } = cropRectPx(video.videoWidth, video.videoHeight, currentCrop);
+    diffCtx.drawImage(video, sx, sy, sw, sh, 0, 0, diffCanvas.width, diffCanvas.height);
     const data = diffCtx.getImageData(0, 0, diffCanvas.width, diffCanvas.height).data;
     const gray = new Uint8ClampedArray(diffCanvas.width * diffCanvas.height);
     for (let i = 0, p = 0; i < data.length; i += 4, p++) {
@@ -489,18 +637,40 @@
     }
   }
 
-  function triggerCapture() {
+  const MAX_UPLOAD_BYTES = 100 * 1024; // TCGTracking's ~100KB decoded image cap, per the plan
+
+  /** Steps JPEG quality down until the blob fits the cap, or gives up at the floor quality.
+   *  Needed specifically BECAUSE we now crop before upload: calibration testing found a tight
+   *  crop of just the card is LARGER at a fixed quality than the full frame (114KB vs 69KB) —
+   *  removing the plain bin background removes the low-entropy content JPEG compresses best,
+   *  leaving dense card art+text. A fixed q0.8 that was safe for full frames isn't safe here. */
+  function canvasToBlobUnderCap(canvas, maxBytes) {
+    const qualities = [0.8, 0.7, 0.6, 0.5, 0.4];
+    return new Promise((resolve) => {
+      let i = 0;
+      const tryNext = () => {
+        canvas.toBlob((blob) => {
+          if (!blob || blob.size <= maxBytes || i === qualities.length - 1) { resolve(blob); return; }
+          i++;
+          tryNext();
+        }, 'image/jpeg', qualities[i]);
+      };
+      tryNext();
+    });
+  }
+
+  async function triggerCapture() {
     state = S.SCANNING;
     setBanner('scanning', 'SCANNING…');
 
-    const w = Math.min(video.videoWidth, 640);
-    const h = Math.round(w * (video.videoHeight / video.videoWidth));
+    const { sx, sy, sw, sh } = cropRectPx(video.videoWidth, video.videoHeight, currentCrop);
+    const w = Math.min(sw, 640);
+    const h = Math.round(w * (sh / sw));
     captureCanvas.width = w; captureCanvas.height = h;
-    captureCtx.drawImage(video, 0, 0, w, h);
-    captureCanvas.toBlob((blob) => {
-      lastCaptureBlob = blob;
-      submitScan(blob);
-    }, 'image/jpeg', 0.8);
+    captureCtx.drawImage(video, sx, sy, sw, sh, 0, 0, w, h);
+    const blob = await canvasToBlobUnderCap(captureCanvas, MAX_UPLOAD_BYTES);
+    lastCaptureBlob = blob;
+    submitScan(blob);
   }
 
   async function submitScan(blob) {
@@ -632,8 +802,7 @@
   $('settings-save-btn').addEventListener('click', async () => {
     try {
       const parsed = JSON.parse($('settings-json').value);
-      await api('/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(parsed) });
-      appSettings = parsed;
+      applySettings(await api('/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(parsed) }));
       $('settings-status').textContent = 'Saved.';
     } catch (err) {
       $('settings-status').textContent = 'Error: ' + err.message;

@@ -10,6 +10,8 @@
   "scanMaxRetries": 3,
   "scanRetryBackoffMs": 1000,
   "cacheTtlHours": 168,
+  "captureCropZoomPct": 100,
+  "captureCropVPosPct": 51,
   "csvColumns": [
     { "header": "TCGplayer Id", "field": "skuId" },
     { "header": "Product Line", "field": "productLine" },

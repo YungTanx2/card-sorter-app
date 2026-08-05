@@ -1,0 +1,32 @@
+{
+  "gameId": 71,
+  "gameName": "Disney Lorcana",
+  "setId": 24666,
+  "setName": "Attack of the Vine! (13)",
+  "cropBox": { "left": 318, "top": 1089, "width": 1315, "height": 1895 },
+  "photos": [
+    {
+      "file": "C:\\Users\\salmo\\OneDrive\\Documents\\ClaudeProjects\\ToShare\\Sample Card Images\\PXL_20260804_163104951.MP.jpg",
+      "name": "Meilin Lee",
+      "subtitle": "Popular Red Panda",
+      "number": "125/207",
+      "foil": true,
+      "note": "sheen visible across card face — treat as foil/cold-foil until confirmed"
+    },
+    {
+      "file": "C:\\Users\\salmo\\OneDrive\\Documents\\ClaudeProjects\\ToShare\\Sample Card Images\\PXL_20260804_163107358.MP.jpg",
+      "name": "Pocahontas",
+      "subtitle": "Guiding the Tribe",
+      "number": "12/207",
+      "foil": false
+    },
+    {
+      "file": "C:\\Users\\salmo\\OneDrive\\Documents\\ClaudeProjects\\ToShare\\Sample Card Images\\PXL_20260804_163109511.MP.jpg",
+      "name": "With a Few Good Friends",
+      "subtitle": null,
+      "number": "65/207",
+      "foil": false,
+      "note": "Action/Song card, not a character"
+    }
+  ]
+}
