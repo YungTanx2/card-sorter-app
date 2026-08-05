@@ -114,6 +114,12 @@
   .last-card { margin-top: 0.9rem; padding: 0.7rem; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; font-size: 0.85rem; }
   .last-card .name { font-weight: 600; }
   .last-card .meta { color: var(--muted); font-size: 0.78rem; margin-top: 0.15rem; }
+  /* Diagnostic capture-preview: exactly what was cropped+resized and POSTed to /scan, not what
+     the camera preview shows — the two can disagree (e.g. an orientation mismatch), and only
+     this thumbnail proves what actually went out. */
+  .last-card .thumb-row { display: flex; gap: 0.7rem; align-items: flex-start; }
+  .last-card img.capture-thumb { width: 4.5rem; height: 4.5rem; object-fit: cover; border-radius: 6px; border: 1px solid var(--border); background: #000; flex: none; }
+  .last-card .download-link { display: inline-block; margin-top: 0.3rem; color: var(--accent); font-size: 0.78rem; text-decoration: none; }
 
   .run-actions { display: flex; gap: 0.6rem; margin-top: 1rem; }
   .run-actions button { flex: 1; }
@@ -239,8 +245,14 @@
     </div>
 
     <div class="last-card" id="last-card" hidden>
-      <div class="name" id="last-card-name"></div>
-      <div class="meta" id="last-card-meta"></div>
+      <div class="thumb-row">
+        <img class="capture-thumb" id="last-card-thumb" alt="Last capture — exactly what was uploaded for recognition" />
+        <div>
+          <div class="name" id="last-card-name"></div>
+          <div class="meta" id="last-card-meta"></div>
+          <a class="download-link" id="last-card-download" download="capture.jpg">Save last capture</a>
+        </div>
+      </div>
     </div>
 
     <div class="stall-banner" id="stall-banner" hidden>
@@ -670,7 +682,25 @@
     captureCtx.drawImage(video, sx, sy, sw, sh, 0, 0, w, h);
     const blob = await canvasToBlobUnderCap(captureCanvas, MAX_UPLOAD_BYTES);
     lastCaptureBlob = blob;
+    // Show the thumbnail immediately, before the scan even resolves — a stalled or wrong-card
+    // result is exactly when you need to see what was actually sent, not just successful ones.
+    updateCaptureThumb(blob);
     submitScan(blob);
+  }
+
+  let lastThumbUrl = null;
+
+  /** Renders the exact bytes POSTed to /scan — deliberately NOT a re-draw from the video
+   *  element, which could look fine on screen while the raw captured buffer is rotated or
+   *  mis-cropped (a known getUserMedia + canvas.drawImage orientation gotcha on some mobile
+   *  browsers). Revokes the previous object URL so a long run doesn't leak memory. */
+  function updateCaptureThumb(blob) {
+    if (lastThumbUrl) URL.revokeObjectURL(lastThumbUrl);
+    lastThumbUrl = URL.createObjectURL(blob);
+    $('last-card').hidden = false;
+    $('last-card-thumb').src = lastThumbUrl;
+    $('last-card-download').href = lastThumbUrl;
+    $('last-card-download').download = 'capture-' + Date.now() + '.jpg'; // unique per save, not per card
   }
 
   async function submitScan(blob) {
