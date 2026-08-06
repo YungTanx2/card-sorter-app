@@ -1,5 +1,7 @@
 // Shared types for the card-sorter app. See the plan at
-// ~/.claude/plans/sunny-whistling-abelson.md for the full architecture writeup.
+// ~/.claude/plans/familiarize-yourself-with-the-abstract-patterson.md for the recognition-layer
+// rewrite (TCGTracking /scan -> self-hosted CLIP embedding matching + TCGCSV catalog), and
+// ~/.claude/plans/sunny-whistling-abelson.md for the original Phase 1 architecture.
 
 export type Decision = 'keeper' | 'bulk';
 
@@ -13,24 +15,42 @@ export type DecisionReason = 'above-threshold' | 'below-threshold' | 'low-confid
 
 export type SessionStatus = 'active' | 'stalled' | 'complete';
 
-/** One row from TCGTracking's /scan results[] array. Not guaranteed to be sorted by score. */
-export interface ScanMatch {
-  product_id: number;
-  score: number;
+/** One candidate card in a session's scope, resolved once from TCGCSV at session creation
+ *  and cached (tcgcsv.ts) — this is the full "known cards" list the embedding matcher scores
+ *  a capture against. Not a live API response shape; a local, pre-warmed record. */
+export interface CandidateCard {
+  productId: number;
   name: string;
-  number: string;
-  printing: string; // unreliable — do not use for variant/pricing decisions, see plan
-  set_id: number;
+  number: string | null; // e.g. "125/207" (Lorcana/Pokemon/Magic) or "OP07-001" (One Piece/Digimon)
+  rarity: string | null;
+  imageUrl: string | null; // TCGCSV reference photo — embedding source AND the CSV export's Photo URL
+  setId: number;
+  setName: string;
 }
 
-export interface ScanResponse {
-  success: boolean;
-  game_id: number;
-  set_ids: number[];
-  cropped_image?: string;
-  results: ScanMatch[];
+/** One (productId, printing) price row from TCGCSV's /prices — unlike TCGTracking's SKU matrix,
+ *  TCGCSV does not split price by condition (it's a blended market rate per printing). */
+export interface TCGCSVPrice {
+  subTypeName: string; // "Normal" | "Holofoil" | "Cold Foil" | ... — equivalent of session.variant
+  marketPrice: number | null;
+  lowPrice: number | null;
 }
 
+/** A candidate's cosine-similarity score against a captured photo. score is in [-1, 1]
+ *  (in practice ~0.4-0.95 for CLIP on card photos) — NOT the old 0-100 TCGTracking scale. */
+export interface EmbeddingMatch {
+  productId: number;
+  score: number;
+}
+
+/**
+ * TCGTracking-sourced types (ProductSku/ProductDetail/ProductCacheRow) — kept narrowly for
+ * one purpose after the recognition-layer rewrite: TCGCSV's free API has no real TCGPlayer
+ * SKU id (only productId), but the CSV export's "TCGplayer Id" column needs one for
+ * TCGTracking's bulk import to actually work. TCGTracking's own /products/{id} still has
+ * it. So this path stays alive, called once per CONFIDENT KEEPER (not per scan, not per
+ * candidate) purely to resolve the real sku_id — see session.ts's resolveSkuForKeeper().
+ */
 export interface ProductSku {
   sku_id: number;
   product_id: number;
@@ -80,14 +100,18 @@ export interface ProductCacheRow {
 }
 
 export interface SessionConfig {
-  gameId: number;
+  gameId: number;   // TCGCSV categoryId — same numbering TCGTracking used (71=Lorcana, 3=Pokemon, ...)
   gameName: string;
-  setIds: number[];       // empty = unscoped (whole game)
-  variant: string;        // e.g. "Normal", "Cold Foil", "Holofoil" — declared by user for the whole run
-  condition: string;      // assumed condition for pricing, default "Near Mint"
+  /** REQUIRED, >=1 groupId (TCGCSV's set id). Unscoped runs are no longer supported: the
+   *  embedding matcher scores a capture against every candidate in scope, so an unscoped
+   *  session would mean matching against the whole game's catalog — exactly the unbounded
+   *  search that made TCGTracking's (broken-scoping) /scan unreliable in the first place. */
+  setIds: number[];
+  variant: string;        // TCGCSV subTypeName, e.g. "Normal", "Cold Foil", "Holofoil" — declared for the whole run
+  condition: string;      // stamped onto the CSV export's Condition column; TCGCSV prices aren't split by condition
   thresholdCents: number; // keeper if price >= this
-  minScore: number;       // confidence gate
-  minGap: number;         // confidence gate: top score - runner-up score
+  minScore: number;       // confidence gate — cosine similarity in [-1, 1], NOT the old 0-100 scale
+  minGap: number;         // confidence gate: top score - runner-up score, same scale as minScore
   location: string;       // TCGTracking location string for this run's keepers, e.g. "A-1-A"
 }
 
@@ -104,10 +128,10 @@ export interface CardRecord {
   sessionId: string;
   seq: number;
   productId: number | null;
-  skuId: number | null;
+  skuId: number | null; // resolved via TCGTracking /products/{id}, only for keepers — see ProductSku doc above
   name: string | null;
-  score: number | null;
-  runnerUpScore: number | null;
+  score: number | null;         // cosine similarity in [-1, 1] against the top candidate
+  runnerUpScore: number | null; // cosine similarity against the #2 candidate
   priceCents: number | null;
   decision: Decision;
   reason: DecisionReason;
@@ -135,6 +159,12 @@ export interface CsvColumnMapping {
 }
 
 export interface AppSettings {
+  /** Cosine similarity in [-1, 1] (typically ~0.4-0.95 for CLIP on real card photos), NOT the
+   *  old 0-100 TCGTracking scale. Defaults below come from the 2026-08-05 Phase A embedding
+   *  harness run (scripts/embedding-harness.ts): 5/6 real photos correct, correct-match scores
+   *  0.74-0.88 with gaps 0.03-0.17; the one miss scored 0.82 but with gap only 0.02 — below
+   *  every genuine match's gap. minGap is the more reliable signal on this evidence. Still only
+   *  n=6 from one set — a real dry run should retune these, not just trust the starting point. */
   minScore: number;
   minGap: number;
   defaultThresholdCents: number;

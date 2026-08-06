@@ -1,95 +1,20 @@
 import { db } from './db';
 import { getSettings } from './settings';
-import { ProductCacheRow, ProductDetail, ProductSku, ScanMatch, ScanResponse } from './types';
+import { ProductCacheRow, ProductDetail, ProductSku } from './types';
 
 // tcgtracking.com is reachable from a Node server via plain fetch/curl but is blocked for
 // browser-based tools in this dev environment — confirmed live during planning. No auth,
 // no rate-limit headers observed. Scheduled deprecation ~Sept 30 2026 per TCGTracking's own
 // docs, migrating to openapi.tcgtracking.com — if this app breaks after that date, that's why.
+//
+// Trimmed down (2026-08-05, see the recognition-layer-rewrite plan) to the ONE thing this
+// module still does: resolve a real TCGPlayer sku_id for a confirmed keeper, via /products/{id}.
+// Everything else that used to live here — catalog browsing (/categories, /sets) and card
+// recognition (/scan) — has moved to tcgcsv.ts (catalog) and embeddings.ts (recognition),
+// because live testing proved /scan's set_ids scoping doesn't work and its results only ever
+// draw from a 5-candidate window of the whole unscoped catalog. TCGCSV's free API has no
+// real sku_id, though (only productId) — that's the one thing left that only TCGTracking has.
 const BASE = 'https://tcgtracking.com/tcgapi/v1';
-
-export interface Category {
-  id: number;
-  name: string;
-  display_name: string;
-  product_count: number;
-  set_count: number;
-}
-
-export interface GameSet {
-  id: number;
-  name: string;
-  abbreviation: string | null;
-}
-
-export async function fetchCategories(): Promise<Category[]> {
-  const res = await fetch(`${BASE}/categories`);
-  if (!res.ok) throw new Error(`TCGTracking /categories failed: ${res.status}`);
-  const data = await res.json() as { categories: Category[] };
-  return data.categories ?? [];
-}
-
-export async function fetchSets(gameId: number): Promise<GameSet[]> {
-  const res = await fetch(`${BASE}/${gameId}/sets`);
-  if (!res.ok) throw new Error(`TCGTracking /${gameId}/sets failed: ${res.status}`);
-  const data = await res.json() as { sets?: GameSet[]; results?: GameSet[] };
-  return data.sets ?? data.results ?? [];
-}
-
-/**
- * Finds one real single card in a set, for sampling its SKU/variant vocabulary on the setup
- * screen. Originally this cross-referenced TCGCSV (see git history / plan doc) because the
- * only by-set endpoints found during planning 404'd — but building against the real API
- * surfaced /{game_id}/sets/{set_id}/cards, which planning missed. `number` (collector number)
- * reliably distinguishes real cards from sealed product/code cards in that response (code
- * cards report rarity:"Code Card" but number:null) — cleaner than a rarity blocklist, and it
- * keeps everything on TCGTracking's own API instead of a second service.
- */
-export async function fetchFirstCardProductId(gameId: number, setId: number): Promise<number | null> {
-  const res = await fetch(`${BASE}/${gameId}/sets/${setId}/cards`);
-  if (!res.ok) throw new Error(`TCGTracking /${gameId}/sets/${setId}/cards failed: ${res.status}`);
-  const data = await res.json() as { products: Array<{ id: number; number: string | null }> };
-  const card = (data.products ?? []).find((p) => p.number);
-  return card?.id ?? null;
-}
-
-/**
- * Calls /scan with a card image. IMPORTANT: TCGTracking does NOT sort results by score —
- * observed live as [100, 94, 53, 53, 56] — so callers must never trust results[0] without
- * this sort. `printing` on each match is also unreliable (a Holofoil-only card can report
- * "Normal") and must not be used for pricing; see ProductSku-based pricing in session.ts.
- */
-export async function scanImage(gameId: number, imageBuffer: Buffer, setIds: number[]): Promise<ScanMatch[]> {
-  const form = new FormData();
-  form.set('game_id', String(gameId));
-  if (setIds.length > 0) form.set('set_ids', JSON.stringify(setIds));
-  form.set('image', new Blob([imageBuffer], { type: 'image/jpeg' }), 'capture.jpg');
-
-  const res = await fetch(`${BASE}/scan`, { method: 'POST', body: form });
-  if (!res.ok) throw new Error(`TCGTracking /scan failed: ${res.status}`);
-  const data = await res.json() as ScanResponse;
-  if (!data.success) throw new Error('TCGTracking /scan returned success:false');
-
-  return [...(data.results ?? [])].sort((a, b) => b.score - a.score);
-}
-
-/** Retry wrapper around scanImage — 3 attempts w/ backoff by default, per the plan's
- *  "retry then stall" policy (session.ts decides what "stall" means at the session level). */
-export async function scanImageWithRetry(gameId: number, imageBuffer: Buffer, setIds: number[]): Promise<ScanMatch[]> {
-  const settings = getSettings();
-  let lastErr: unknown;
-  for (let attempt = 0; attempt < settings.scanMaxRetries; attempt++) {
-    try {
-      return await scanImage(gameId, imageBuffer, setIds);
-    } catch (err) {
-      lastErr = err;
-      if (attempt < settings.scanMaxRetries - 1) {
-        await new Promise((r) => setTimeout(r, settings.scanRetryBackoffMs * (attempt + 1)));
-      }
-    }
-  }
-  throw lastErr instanceof Error ? lastErr : new Error('TCGTracking /scan failed after retries');
-}
 
 async function fetchProductDetail(productId: number): Promise<ProductDetail> {
   const res = await fetch(`${BASE}/products/${productId}`);
@@ -110,12 +35,10 @@ const upsertCached = db.prepare(`
 `);
 
 /**
- * Cache-aside lookup for a product's SKU/price matrix. There is NO bulk SKU source anywhere
- * (confirmed live: TCGCSV product records have no skus[] key, and TCGTracking has no by-set
- * product listing endpoint) — sku_id and per-variant pricing are only obtainable one product
- * at a time via /products/{id}. So this cache is load-bearing, not an optimization: without
- * it, sorting the same set twice would re-pay the full per-card fetch cost every run. Persists
- * in SQLite (db.ts) specifically so it warms ACROSS runs, not just within one.
+ * Cache-aside lookup for a product's real SKU matrix (the only remaining reason this file
+ * exists — see the module doc above). Called once per confirmed keeper, not per scan, so the
+ * caching here matters less than it used to, but still avoids re-fetching on repeat cards
+ * within the same set across sessions.
  */
 export async function getProductCached(productId: number): Promise<{ row: ProductCacheRow; skus: ProductSku[] }> {
   const settings = getSettings();

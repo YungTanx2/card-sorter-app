@@ -1,6 +1,6 @@
 {
-  "minScore": 70,
-  "minGap": 10,
+  "minScore": 0.65,
+  "minGap": 0.025,
   "defaultThresholdCents": 50,
   "defaultCondition": "Near Mint",
   "captureIntervalMs": 200,

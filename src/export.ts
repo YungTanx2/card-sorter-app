@@ -78,11 +78,16 @@ export interface ExcludedKeeper {
  */
 export function buildKeeperCsv(session: Session): { csv: string; excluded: ExcludedKeeper[] } {
   const settings = getSettings();
+  // Joins tcgcsv_cache, not product_cache: tcgcsv_cache is pre-warmed for every candidate in
+  // the session's scope at session creation (session.ts), so every keeper has a row here.
+  // product_cache (TCGTracking-shaped) is now written lazily and only for confirmed keepers
+  // (session.ts's resolveSkuForKeeper) — it has the sku_id already selected via cards.sku_id,
+  // but isn't the right join for display metadata. See db.ts for why these are separate tables.
   const rows = db.prepare(`
     SELECT c.seq, c.sku_id, c.name, c.price_cents,
            p.number, p.rarity, p.set_name, p.image_url
     FROM cards c
-    LEFT JOIN product_cache p ON p.product_id = c.product_id
+    LEFT JOIN tcgcsv_cache p ON p.product_id = c.product_id
     WHERE c.session_id = ? AND c.decision = 'keeper'
     ORDER BY c.seq
   `).all(session.id) as KeeperRow[];
@@ -93,7 +98,7 @@ export function buildKeeperCsv(session: Session): { csv: string; excluded: Exclu
 
   for (const row of rows) {
     if (row.sku_id === null) {
-      excluded.push({ seq: row.seq, name: row.name, reason: `no SKU for the declared variant "${session.variant}" — likely only exists as a different printing` });
+      excluded.push({ seq: row.seq, name: row.name, reason: `no confirmed TCGplayer SKU for the declared variant "${session.variant}" — either it only exists as a different printing, or the TCGTracking lookup failed (see session.ts's resolveSkuForKeeper)` });
       continue;
     }
     const price = row.price_cents !== null ? (row.price_cents / 100).toFixed(2) : '';
