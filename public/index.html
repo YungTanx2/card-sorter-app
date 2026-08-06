@@ -155,14 +155,14 @@
 
   <!-- ══════════════════════ SETUP ══════════════════════ -->
   <section id="view-setup">
-    <p class="hint">Before your first run on a new mount, open <strong>Calibrate</strong> to align the capture window to where the card actually lands in frame — an uncropped frame recognized 0/3 real cards in testing; a cropped one recognized 2/3.</p>
+    <p class="hint">Before your first run on a new mount, open <strong>Calibrate</strong> to align the capture window to where the card actually lands in frame — recognition matches a cropped photo against each card's reference image, so a tight, consistent crop still matters even though recognition itself now runs locally (5/6 correct in the last real test).</p>
 
     <label for="game-select">Game</label>
     <select id="game-select"></select>
 
-    <label for="set-select">Sets — optional, none = whole game (plan Decision #10)</label>
+    <label for="set-select">Sets — required, select at least one</label>
     <select id="set-select" multiple></select>
-    <p class="hint">Select the set(s) you're sorting for the tightest recognition accuracy. Leave nothing selected to scan against the whole game.</p>
+    <p class="hint">The recognition step matches your capture against every card in the selected set(s) — an unscoped run would mean matching against the whole game's catalog, which testing showed doesn't work reliably (see the recognition-layer rewrite plan). Select every set in the pile if it's mixed.</p>
 
     <div class="row">
       <div>
@@ -191,15 +191,15 @@
       <summary>Advanced — confidence thresholds</summary>
       <div class="row">
         <div>
-          <label for="min-score-input">Min score</label>
-          <input type="number" id="min-score-input" min="0" max="100" />
+          <label for="min-score-input">Min score (cosine similarity)</label>
+          <input type="number" id="min-score-input" min="-1" max="1" step="0.01" />
         </div>
         <div>
           <label for="min-gap-input">Min gap to runner-up</label>
-          <input type="number" id="min-gap-input" min="0" max="100" />
+          <input type="number" id="min-gap-input" min="0" max="1" step="0.005" />
         </div>
       </div>
-      <p class="hint">Any card below either threshold routes to bulk with a searchable record (Decision #2/#9). Tune these from a dry run's manifest.csv.</p>
+      <p class="hint">Cosine similarity in [-1, 1], not the old 0-100 scale — real card photos typically score ~0.4-0.95. Any card below either threshold routes to bulk with a searchable record (Decision #2/#9). Defaults come from a 6-photo test run, not a full calibration — tune from a real dry run's manifest.csv.</p>
     </details>
 
     <div id="setup-error"></div>
@@ -256,7 +256,7 @@
     </div>
 
     <div class="stall-banner" id="stall-banner" hidden>
-      <p><strong>Stalled.</strong> TCGTracking didn't respond after retries — the machine should still be holding this card, waiting for a tone that hasn't been sent. Fix your connection, then retry.</p>
+      <p><strong>Stalled.</strong> Recognition couldn't reach a decision — the machine should still be holding this card, waiting for a tone that hasn't been sent. Retry below.</p>
       <button class="secondary" id="retry-scan-btn" style="width:100%">Retry scan</button>
     </div>
 
@@ -456,6 +456,10 @@
     const setIds = Array.from($('set-select').selectedOptions).map((o) => Number(o.value));
     const location = $('location-input').value.trim();
 
+    if (setIds.length === 0) {
+      $('setup-error').innerHTML = '<div class="error-box">Select at least one set — the recognition step matches against the selected set\'s cards, not the whole game.</div>';
+      return;
+    }
     if (!location) {
       $('setup-error').innerHTML = '<div class="error-box">Location is required — this is stamped into every keeper row on export.</div>';
       return;
@@ -473,6 +477,13 @@
       location,
     };
 
+    // Starting a run pre-warms the catalog + embeddings for every selected set server-side
+    // (session.ts) — near-instant on a set that's been used before, but can take real time
+    // the first time (fetching + embedding every candidate in the set). Disable + relabel the
+    // button so a slow-but-working first run doesn't look like the tap did nothing.
+    const btn = $('start-run-btn');
+    btn.disabled = true;
+    btn.textContent = 'Preparing set… (first time on a new set can take a minute)';
     try {
       session = await api('/api/session', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
       sessionStorage.setItem('cardSorterSessionId', session.id);
@@ -481,6 +492,9 @@
       await startRun();
     } catch (err) {
       $('setup-error').innerHTML = `<div class="error-box">${err.message}</div>`;
+    } finally {
+      btn.disabled = false;
+      btn.textContent = 'Start Run';
     }
   });
 

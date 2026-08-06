@@ -1,7 +1,7 @@
 import express from 'express';
 import multer from 'multer';
 import path from 'path';
-import { fetchCategories, fetchSets, fetchFirstCardProductId, getProductCached } from './tcgtracking';
+import { fetchCategories, fetchSets, fetchVariants } from './tcgcsv';
 import { getSettings, updateSettings } from './settings';
 import {
   createSession, getSession, resumeSession, completeSession,
@@ -31,24 +31,31 @@ function requireSession(req: express.Request, res: express.Response) {
 
 // ---- catalog browsing (game/set/variant pickers on the setup screen) ----
 
-// The physical sort only ever covers these 5 TCGs — TCGTracking's /categories returns ~90
+// The physical sort only ever covers these 5 TCGs — TCGCSV's /categories returns ~90
 // (sleeves, playmats, storage albums, etc. included), which would swamp a one-handed mobile
-// picker. IDs (not name matching) so a display-name change on TCGTracking's side can't
-// silently drop or add a game; confirmed live via `scripts/calibrate.ts --list-sets` (2026-08-04).
-// Order here is the dropdown order.
+// picker. IDs (not name matching) so a display-name change on TCGCSV's side can't silently
+// drop or add a game; confirmed live via `scripts/calibrate.ts --list-sets` (2026-08-04) —
+// TCGCSV and TCGTracking use the same TCGPlayer categoryId numbering. Order here is the
+// dropdown order.
 const ALLOWED_GAME_IDS = [71, 63, 3, 1, 68]; // Disney Lorcana, Digimon Card Game, Pokemon, Magic: The Gathering, One Piece Card Game
+
+// TCGCSV's free API has no per-card condition data (its prices are a blended market rate per
+// printing, not split by condition — see types.ts's TCGCSVPrice doc). Condition is now purely
+// a label stamped onto the CSV export, not something the API can discover — standard
+// TCGPlayer condition set, in the order sellers usually see them.
+const STANDARD_CONDITIONS = ['Near Mint', 'Lightly Played', 'Moderately Played', 'Heavily Played', 'Damaged'];
 
 app.get('/api/games', async (_req, res) => {
   try {
     const categories = await fetchCategories();
     const allowed = ALLOWED_GAME_IDS.map((id) => categories.find((c) => c.id === id)).filter((c): c is NonNullable<typeof c> => !!c);
     if (allowed.length < ALLOWED_GAME_IDS.length) {
-      console.warn(`[games] only resolved ${allowed.length}/${ALLOWED_GAME_IDS.length} allowed game ids — TCGTracking may have renumbered a category`);
+      console.warn(`[games] only resolved ${allowed.length}/${ALLOWED_GAME_IDS.length} allowed game ids — TCGCSV may have renumbered a category`);
     }
     res.json(allowed);
   } catch (err) {
     console.error('[games]', err);
-    res.status(502).json({ error: 'Failed to reach TCGTracking.' });
+    res.status(502).json({ error: 'Failed to reach TCGCSV.' });
   }
 });
 
@@ -62,12 +69,14 @@ app.get('/api/sets', async (req, res) => {
     res.json(await fetchSets(gameId));
   } catch (err) {
     console.error('[sets]', err);
-    res.status(502).json({ error: 'Failed to reach TCGTracking.' });
+    res.status(502).json({ error: 'Failed to reach TCGCSV.' });
   }
 });
 
-/** Samples one card from the set to discover its valid variant names (Normal / Holofoil /
- *  Cold Foil / ...) — see plan: no per-game variant table, discovered dynamically. */
+/** Discovers valid variant names (Normal / Holofoil / Cold Foil / ...) for a set — TCGCSV's
+ *  /prices already returns every product's prices for the whole group in one call, so unlike
+ *  the old TCGTracking approach (sample one real card via a separate endpoint), this just
+ *  reads distinct subTypeName values directly. See plan: no per-game variant table. */
 app.get('/api/variants', async (req, res) => {
   const gameId = Number(req.query.game_id);
   const setId = Number(req.query.set_id);
@@ -76,15 +85,12 @@ app.get('/api/variants', async (req, res) => {
     return;
   }
   try {
-    const productId = await fetchFirstCardProductId(gameId, setId);
-    if (!productId) {
-      res.status(404).json({ error: 'No cards found in that set.' });
+    const variants = await fetchVariants(gameId, setId);
+    if (variants.length === 0) {
+      res.status(404).json({ error: 'No priced cards found in that set.' });
       return;
     }
-    const { skus } = await getProductCached(productId);
-    const conditions = [...new Set(skus.map((s) => s.condition_name))];
-    const variants = [...new Set(skus.map((s) => s.variant_name))];
-    res.json({ variants, conditions });
+    res.json({ variants, conditions: STANDARD_CONDITIONS });
   } catch (err) {
     console.error('[variants]', err);
     res.status(502).json({ error: 'Failed to determine variants for that set.' });
@@ -93,17 +99,26 @@ app.get('/api/variants', async (req, res) => {
 
 // ---- sessions ----
 
-app.post('/api/session', (req, res) => {
+app.post('/api/session', async (req, res) => {
   const b = req.body ?? {};
   const settings = getSettings();
+  const setIds = Array.isArray(b.setIds) ? b.setIds.map(Number) : [];
   if (!b.gameId || !b.gameName || !b.variant || !b.location) {
     res.status(400).json({ error: 'Body requires gameId, gameName, variant, location.' });
+    return;
+  }
+  if (setIds.length === 0) {
+    // Set selection is required now, not optional — the embedding matcher scores a capture
+    // against every candidate in scope, so an unbounded (whole-game) session would mean
+    // matching against the entire catalog, the same unscoped search that made TCGTracking's
+    // (broken-scoping) /scan unreliable in the first place. See plan.
+    res.status(400).json({ error: 'At least one set must be selected.' });
     return;
   }
   const config: SessionConfig = {
     gameId: Number(b.gameId),
     gameName: String(b.gameName),
-    setIds: Array.isArray(b.setIds) ? b.setIds.map(Number) : [],
+    setIds,
     variant: String(b.variant),
     condition: b.condition ? String(b.condition) : settings.defaultCondition,
     thresholdCents: Number.isFinite(b.thresholdCents) ? Number(b.thresholdCents) : settings.defaultThresholdCents,
@@ -111,7 +126,16 @@ app.post('/api/session', (req, res) => {
     minGap: Number.isFinite(b.minGap) ? Number(b.minGap) : settings.minGap,
     location: String(b.location),
   };
-  res.json(createSession(config));
+  try {
+    // Pre-warms the catalog + embeddings for every selected set (see session.ts) — can take
+    // real time the first time a set is used (fetching + embedding every candidate), which is
+    // why this is a real try/catch here rather than a fire-and-forget: a slow-but-working first
+    // run on a new set is fine, a silently-hung request is not.
+    res.json(await createSession(config));
+  } catch (err) {
+    console.error('[session/create]', err);
+    res.status(502).json({ error: err instanceof Error ? err.message : 'Failed to prepare the selected set(s) — check the connection and try again.' });
+  }
 });
 
 app.get('/api/session/:id', (req, res) => {

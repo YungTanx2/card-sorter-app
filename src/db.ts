@@ -30,6 +30,34 @@ db.exec(`
     fetched_at   INTEGER NOT NULL
   );
 
+  -- TCGCSV-sourced catalog cache — deliberately a SEPARATE table from product_cache above.
+  -- product_cache is written by tcgtracking.ts's getProductCached() in TCGTracking's own SKU
+  -- shape (skus_json = per-condition/variant SKU matrix, still used narrowly to resolve real
+  -- TCGPlayer sku_ids for the CSV export — see types.ts's ProductSku doc). tcgcsv_cache is
+  -- written by tcgcsv.ts in TCGCSV's shape (prices_json = per-printing blended market price,
+  -- no condition split, no sku_id). Sharing one table between two incompatible schemas keyed
+  -- by the same product_id would silently corrupt whichever wrote second — see the plan.
+  CREATE TABLE IF NOT EXISTS tcgcsv_cache (
+    product_id   INTEGER PRIMARY KEY,
+    name         TEXT NOT NULL,
+    set_id       INTEGER NOT NULL,
+    set_name     TEXT NOT NULL,
+    number       TEXT,
+    rarity       TEXT,
+    image_url    TEXT,
+    prices_json  TEXT NOT NULL,
+    fetched_at   INTEGER NOT NULL
+  );
+
+  -- CLIP embedding per candidate card, keyed by TCGCSV product_id — populated once per
+  -- (product, embedding model) and reused across every future session that scopes the same
+  -- set, since re-embedding is the compute-expensive step. embedding is JSON.stringify(number[]).
+  CREATE TABLE IF NOT EXISTS embedding_cache (
+    product_id INTEGER PRIMARY KEY,
+    embedding  TEXT NOT NULL,
+    fetched_at INTEGER NOT NULL
+  );
+
   CREATE TABLE IF NOT EXISTS sessions (
     id                 TEXT PRIMARY KEY,
     game_id            INTEGER NOT NULL,

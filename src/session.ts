@@ -1,13 +1,20 @@
 import crypto from 'crypto';
 import { db } from './db';
-import { getProductCached, scanImageWithRetry } from './tcgtracking';
-import { BulkBox, CardRecord, Decision, DecisionReason, ProductSku, Session, SessionConfig, SessionStatus } from './types';
+import { getProductCached } from './tcgtracking';
+import { matchCard, prewarmEmbeddings } from './embeddings';
+import { fetchSets, getCandidatesForSets, getPricesForProduct, prewarmSet } from './tcgcsv';
+import { BulkBox, CardRecord, Decision, DecisionReason, Session, SessionConfig, SessionStatus, TCGCSVPrice } from './types';
 
-/** Thrown when /scan fails after retries — a genuine "can't reach a decision" state, distinct
- *  from a low-confidence match. Per plan Decision #12: never guess-route on this, stall the
- *  session instead. The physical card is still sitting on the X1PRO holding for a tone that
- *  we're intentionally not sending, so nothing is lost — server.ts turns this into a 503 and
- *  the frontend shows a retry banner instead of arming for the next card. */
+/** Thrown when recognition can't reach a decision — a genuine failure, distinct from a
+ *  low-confidence match. Per plan Decision #12: never guess-route on this, stall the session
+ *  instead. The physical card is still sitting on the X1PRO holding for a tone that we're
+ *  intentionally not sending, so nothing is lost — server.ts turns this into a 503 and the
+ *  frontend shows a retry banner instead of arming for the next card.
+ *
+ *  Post-rewrite, this covers a narrower surface than before: matching itself is now local
+ *  (embeddings.ts, no network), so this only fires for genuinely unexpected failures upstream
+ *  of the keeper/bulk decision (a corrupt cached embedding, the model failing to load, etc.).
+ *  It deliberately does NOT cover the post-decision SKU lookup below — see resolveSkuForKeeper. */
 export class StallError extends Error {}
 
 // ---- sessions ----
@@ -37,7 +44,20 @@ function toSession(row: SessionRow): Session {
   };
 }
 
-export function createSession(config: SessionConfig): Session {
+/**
+ * Creates the session row, then pre-warms the catalog + embeddings for every scoped set
+ * before returning. This is why scanCard() below needs zero network calls during an actual
+ * run: TCGCSV gives a bulk per-set catalog+price source (unlike TCGTracking, which had none,
+ * hence the old lazy per-scan product_cache design) and every candidate's reference image is
+ * embedded once here rather than on first scan. For a brand-new set this can take real time
+ * (fetching + embedding every candidate, ~150-250 typical) — acceptable for a one-time cost
+ * per set, since tcgcsv_cache/embedding_cache persist across every future session on it.
+ */
+export async function createSession(config: SessionConfig): Promise<Session> {
+  if (config.setIds.length === 0) {
+    throw new Error('At least one set must be selected — unscoped runs are no longer supported (see plan).');
+  }
+
   const now = Date.now();
   const id = crypto.randomUUID();
   insertSession.run({
@@ -46,6 +66,15 @@ export function createSession(config: SessionConfig): Session {
     minScore: config.minScore, minGap: config.minGap, location: config.location,
     status: 'active' as SessionStatus, createdAt: now, updatedAt: now,
   });
+
+  const sets = await fetchSets(config.gameId);
+  const setNameById = new Map(sets.map((s) => [s.id, s.name]));
+  for (const groupId of config.setIds) {
+    const groupName = setNameById.get(groupId) ?? String(groupId);
+    const candidates = await prewarmSet(config.gameId, groupId, groupName);
+    await prewarmEmbeddings(candidates);
+  }
+
   return getSession(id)!;
 }
 
@@ -110,32 +139,45 @@ const insertCard = db.prepare(`
 `);
 const nextSeq = db.prepare('SELECT COALESCE(MAX(seq), 0) + 1 as n FROM cards WHERE session_id = ?');
 
-/** Picks a price for the session's declared (variant, condition) from a product's SKU matrix.
- *  Exact match first; falls back to the declared condition with any variant (cheapest, to stay
- *  conservative) if the declared variant genuinely isn't a valid printing for this card; falls
- *  back to the product's blended market_price as a last resort. Returns null only if the
- *  product has no price data at all, in which case the caller treats it as low-confidence. */
-function resolvePriceCents(skus: ProductSku[], variant: string, condition: string, blendedMarketPrice: string | number | null): number | null {
-  const toNum = (v: string | number | null | undefined): number | null => {
-    if (v === null || v === undefined) return null;
-    const n = typeof v === 'number' ? v : parseFloat(v);
-    return Number.isFinite(n) ? n : null;
-  };
+/** Picks a price for the session's declared variant from TCGCSV's per-printing price list.
+ *  Exact subTypeName match first; falls back to the cheapest available printing (conservative)
+ *  if the declared variant genuinely isn't valid for this card. Unlike the old TCGTracking SKU
+ *  matrix, TCGCSV doesn't split price by condition — condition is stamped onto the export as
+ *  metadata (session.condition) but no longer affects the price lookup itself. Returns null
+ *  only if the product has no price data at all, in which case the caller treats it as
+ *  low-confidence. */
+function resolvePriceCents(prices: TCGCSVPrice[], variant: string): number | null {
+  const exact = prices.find((p) => p.subTypeName === variant);
+  if (exact?.marketPrice != null && Number.isFinite(exact.marketPrice)) {
+    return Math.round(exact.marketPrice * 100);
+  }
 
-  const exact = skus.find((s) => s.variant_name === variant && s.condition_name === condition);
-  const exactPrice = toNum(exact?.market_price);
-  if (exactPrice !== null) return Math.round(exactPrice * 100);
-
-  const sameCondition = skus
-    .filter((s) => s.condition_name === condition)
-    .map((s) => toNum(s.market_price))
-    .filter((n): n is number => n !== null);
-  if (sameCondition.length > 0) return Math.round(Math.min(...sameCondition) * 100);
-
-  const blended = toNum(blendedMarketPrice);
-  if (blended !== null) return Math.round(blended * 100);
+  const anyPrice = prices
+    .map((p) => p.marketPrice)
+    .filter((n): n is number => n !== null && Number.isFinite(n));
+  if (anyPrice.length > 0) return Math.round(Math.min(...anyPrice) * 100);
 
   return null;
+}
+
+/**
+ * TCGCSV has no real TCGPlayer SKU id (only productId) — see types.ts's ProductSku doc. The
+ * CSV export's "TCGplayer Id" column needs one for TCGTracking's bulk import to work, and
+ * TCGTracking's own /products/{id} still has it. So this one narrow call stays alive, but only
+ * for CONFIRMED KEEPERS (not per scan, not per candidate) — a much smaller footprint than the
+ * old system's per-scan dependency. Deliberately does NOT stall the session on failure: the
+ * keeper/bulk routing decision is already made and correct by the time this runs, so a network
+ * hiccup here shouldn't block the physical machine. It soft-fails to skuId=null, which
+ * export.ts's existing ExcludedKeeper path already handles (same as "no SKU for this variant").
+ */
+async function resolveSkuForKeeper(productId: number, variant: string, condition: string): Promise<number | null> {
+  try {
+    const { skus } = await getProductCached(productId);
+    return skus.find((s) => s.variant_name === variant && s.condition_name === condition)?.sku_id ?? null;
+  } catch (err) {
+    console.warn(`[session] SKU lookup failed for keeper product ${productId} — will export without a TCGplayer Id:`, err instanceof Error ? err.message : err);
+    return null;
+  }
 }
 
 export interface ScanCardResult {
@@ -145,26 +187,30 @@ export interface ScanCardResult {
 }
 
 /**
- * The core per-card decision. Throws StallError if TCGTracking is unreachable after retries —
- * everything else (unrecognized card, ambiguous match, unpriceable card) resolves to a logged
- * 'bulk' decision per the project's fail-safe-to-bulk policy, never a guess toward 'keeper'.
+ * The core per-card decision. Recognition (embeddings.ts) and pricing (tcgcsv.ts) are both
+ * fully local — no network calls during a run, since everything was pre-warmed at session
+ * creation. Throws StallError only for a genuinely unexpected failure upstream of the
+ * decision; everything else (unrecognized card, ambiguous match, unpriceable card) resolves
+ * to a logged 'bulk' decision per the project's fail-safe-to-bulk policy, never a guess
+ * toward 'keeper'.
  */
 export async function scanCard(sessionId: string, imageBuffer: Buffer): Promise<ScanCardResult> {
   const session = getSession(sessionId);
   if (!session) throw new Error(`Session ${sessionId} not found`);
 
-  let matches;
+  let top, runnerUp, candidates;
   try {
-    matches = await scanImageWithRetry(session.gameId, imageBuffer, session.setIds);
+    candidates = getCandidatesForSets(session.setIds);
+    const match = await matchCard(imageBuffer, candidates);
+    top = match.top;
+    runnerUp = match.runnerUp;
   } catch (err) {
     updateSessionStatus.run('stalled', Date.now(), sessionId);
-    throw new StallError(err instanceof Error ? err.message : 'scan failed');
+    throw new StallError(err instanceof Error ? err.message : 'recognition failed');
   }
-  // A successful scan clears any prior stall — see plan Decision #12 ("runs are resumable").
+  // A successful match clears any prior stall — see plan Decision #12 ("runs are resumable").
   if (session.status === 'stalled') updateSessionStatus.run('active', Date.now(), sessionId);
 
-  const top = matches[0];
-  const runnerUp = matches[1];
   const seq = (nextSeq.get(sessionId) as { n: number }).n;
   const scannedAt = Date.now();
 
@@ -183,29 +229,30 @@ export async function scanCard(sessionId: string, imageBuffer: Buffer): Promise<
   }
 
   const confident = top.score >= session.minScore && (!runnerUp || top.score - runnerUp.score >= session.minGap);
+  const name = candidates.find((c) => c.productId === top!.productId)?.name ?? null;
+
   if (!confident) {
     // Log the best guess anyway — this is what makes the bulk pile searchable per plan
     // Decision #2, even though we don't trust it enough to act on it.
-    return recordBulk('low-confidence', top.product_id, top.name, top.score, null, null);
+    return recordBulk('low-confidence', top.productId, name, top.score, null, null);
   }
 
-  const { row: product, skus } = await getProductCached(top.product_id);
-  const priceCents = resolvePriceCents(skus, session.variant, session.condition, product.market_price);
-  const sku = skus.find((s) => s.variant_name === session.variant && s.condition_name === session.condition);
+  const priceCents = resolvePriceCents(getPricesForProduct(top.productId), session.variant);
 
   if (priceCents === null) {
-    return recordBulk('low-confidence', top.product_id, product.name, top.score, sku?.sku_id ?? null, null);
+    return recordBulk('low-confidence', top.productId, name, top.score, null, null);
   }
 
   const decision: Decision = priceCents >= session.thresholdCents ? 'keeper' : 'bulk';
   const reason: DecisionReason = decision === 'keeper' ? 'above-threshold' : 'below-threshold';
 
   if (decision === 'bulk') {
-    return recordBulk(reason, top.product_id, product.name, top.score, sku?.sku_id ?? null, priceCents);
+    return recordBulk(reason, top.productId, name, top.score, null, priceCents);
   }
 
+  const skuId = await resolveSkuForKeeper(top.productId, session.variant, session.condition);
   const info = insertCard.run({
-    sessionId, seq, productId: top.product_id, skuId: sku?.sku_id ?? null, name: product.name,
+    sessionId, seq, productId: top.productId, skuId, name,
     score: top.score, runnerUpScore: runnerUp?.score ?? null, priceCents, decision: 'keeper',
     reason, bulkBoxId: null, scannedAt,
   });
