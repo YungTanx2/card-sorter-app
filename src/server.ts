@@ -1,6 +1,7 @@
 import express from 'express';
 import multer from 'multer';
 import path from 'path';
+import { db } from './db';
 import { fetchCategories, fetchSets, fetchVariants, fetchRarities } from './tcgcsv';
 import { getSettings, updateSettings } from './settings';
 import { StallError } from './errors';
@@ -424,6 +425,44 @@ app.put('/api/settings', (req, res) => {
   res.json(updateSettings(req.body ?? {}));
 });
 
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
   console.log(`card-sorter-app listening on port ${PORT}`);
 });
+
+/**
+ * Graceful shutdown. Railway sends SIGTERM whenever a container is replaced, which is every
+ * single deploy — without a handler, Node dies by signal and the platform reports an ordinary
+ * handover as a crashed deployment. (Worse before this change: the start command wrapped the
+ * app in `npm start`, and npm turns its child's SIGTERM into `npm error signal SIGTERM` plus a
+ * non-zero exit, so a clean stop was indistinguishable from a real failure — see railway.json.)
+ *
+ * Closing the database is the part that actually matters, not just the exit code: better-sqlite3
+ * runs in WAL mode (db.ts), and an abrupt kill leaves the write-ahead log un-checkpointed.
+ * SQLite recovers on next open, but now that a mounted volume holds Set Builder goal progress —
+ * the first state in this app that can't be refetched from an API — checkpointing on the way out
+ * is worth the few lines.
+ */
+let shuttingDown = false;
+function shutdown(signal: string) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`[shutdown] ${signal} received — closing server and database`);
+  server.close(() => {
+    try {
+      db.close(); // checkpoints the WAL
+    } catch (err) {
+      console.warn('[shutdown] db close failed:', err instanceof Error ? err.message : err);
+    }
+    process.exit(0);
+  });
+  // Don't let an in-flight scan (embedding a capture can take a second or two) hold the
+  // container open past the platform's grace period — exit anyway rather than be SIGKILLed,
+  // which would skip the checkpoint entirely.
+  setTimeout(() => {
+    console.warn('[shutdown] forced exit after grace period');
+    process.exit(0);
+  }, 8000).unref();
+}
+
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
