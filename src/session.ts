@@ -1,21 +1,17 @@
 import crypto from 'crypto';
 import { db } from './db';
+import { StallError } from './errors';
 import { getProductCached } from './tcgtracking';
 import { matchCard, prewarmEmbeddings } from './embeddings';
 import { fetchSets, getCandidatesForSets, getPricesForProduct, prewarmSet } from './tcgcsv';
 import { BulkBox, CardRecord, Decision, DecisionReason, Session, SessionConfig, SessionStatus, TCGCSVPrice } from './types';
 
-/** Thrown when recognition can't reach a decision — a genuine failure, distinct from a
- *  low-confidence match. Per plan Decision #12: never guess-route on this, stall the session
- *  instead. The physical card is still sitting on the X1PRO holding for a tone that we're
- *  intentionally not sending, so nothing is lost — server.ts turns this into a 503 and the
- *  frontend shows a retry banner instead of arming for the next card.
- *
- *  Post-rewrite, this covers a narrower surface than before: matching itself is now local
- *  (embeddings.ts, no network), so this only fires for genuinely unexpected failures upstream
- *  of the keeper/bulk decision (a corrupt cached embedding, the model failing to load, etc.).
- *  It deliberately does NOT cover the post-decision SKU lookup below — see resolveSkuForKeeper. */
-export class StallError extends Error {}
+/** Re-exported from errors.ts, where it moved so Set Builder's scan pipeline can throw the same
+ *  type. In THIS pipeline it covers a narrow surface: matching is local (embeddings.ts, no
+ *  network), so it only fires for genuinely unexpected failures upstream of the keeper/bulk
+ *  decision (a corrupt cached embedding, the model failing to load, etc.). It deliberately does
+ *  NOT cover the post-decision SKU lookup below — see resolveSkuForKeeper. */
+export { StallError } from './errors';
 
 // ---- sessions ----
 

@@ -1,0 +1,296 @@
+/**
+ * Shared camera stack for every capture-driven mode in this app.
+ *
+ * Extracted verbatim from index.html (the price-sorter page) when Set Builder mode was added.
+ * The reason it's shared rather than copied: this is the least-settled code in the project —
+ * the crop geometry, the frame-diff trigger and the adaptive-quality JPEG step were all derived
+ * from real calibration runs and are still being tuned against a rig whose orientation behavior
+ * isn't fully diagnosed. Two copies would silently diverge exactly when that tuning happens.
+ *
+ * The ONLY mode-specific part of a capture is what happens to the resulting blob, which is why
+ * CaptureRig takes an onCapture(blob) callback and knows nothing about sessions, goals,
+ * decisions, or any API route.
+ *
+ * Plain script (not an ESM module) exposing one global, so the consuming pages can keep their
+ * existing IIFE structure unchanged.
+ */
+window.CardSorterCapture = (function () {
+  'use strict';
+
+  // ═══════════════════════ API HELPER ═══════════════════════════
+
+  async function api(path, opts) {
+    const res = await fetch(path, opts);
+    let body = null;
+    try { body = await res.json(); } catch (e) { /* no body */ }
+    if (!res.ok) {
+      const err = new Error((body && body.error) || (res.status + ' ' + res.statusText));
+      err.status = res.status;
+      err.body = body;
+      throw err;
+    }
+    return body;
+  }
+
+  // ═══════════════════════ CROP GEOMETRY ═══════════════════════════════
+
+  // Base crop, as fractions of the frame — the exact box validated in the 2026-08-04
+  // calibration run (scripts/calibrate.ts): full frame scored 0/3 correct against real
+  // TCGTracking /scan calls, this crop scored 2/3 with a clean score/gap separation from wrong
+  // matches. captureCropZoomPct=100 reproduces it exactly; sliders scale/reposition from here.
+  const BASE_CROP_W = 0.58;
+  const BASE_CROP_H = 0.47;
+  const clamp = (n, lo, hi) => Math.min(hi, Math.max(lo, n));
+
+  /** Maps the two persisted slider values to an absolute crop rectangle. Box is always
+   *  horizontally centered (matches every sample photo — the rig points straight down at a
+   *  centered card holder); only size (zoom) and vertical position are adjustable. */
+  function getCrop(settings) {
+    const scale = settings.captureCropZoomPct / 100;
+    const width = clamp(BASE_CROP_W * scale, 0.15, 0.95);
+    const height = clamp(BASE_CROP_H * scale, 0.15, 0.95);
+    const top = (settings.captureCropVPosPct / 100) * (1 - height);
+    const left = (1 - width) / 2;
+    return { left, top, width, height };
+  }
+
+  function renderCropGuide(el, crop) {
+    el.style.left = (crop.left * 100) + '%';
+    el.style.top = (crop.top * 100) + '%';
+    el.style.width = (crop.width * 100) + '%';
+    el.style.height = (crop.height * 100) + '%';
+  }
+
+  /** Converts a fractional crop into the video element's native pixel coordinates — needed
+   *  because getUserMedia's actual resolution isn't known until the stream is playing, so the
+   *  crop can't be baked in as pixels ahead of time. */
+  function cropRectPx(videoWidth, videoHeight, crop) {
+    return {
+      sx: Math.round(crop.left * videoWidth),
+      sy: Math.round(crop.top * videoHeight),
+      sw: Math.round(crop.width * videoWidth),
+      sh: Math.round(crop.height * videoHeight),
+    };
+  }
+
+  // ═══════════════════════ CAPTURE ENCODING ═══════════════════════════
+
+  const MAX_UPLOAD_BYTES = 100 * 1024;
+
+  /** Steps JPEG quality down until the blob fits the cap, or gives up at the floor quality.
+   *  Needed specifically BECAUSE we now crop before upload: calibration testing found a tight
+   *  crop of just the card is LARGER at a fixed quality than the full frame (114KB vs 69KB) —
+   *  removing the plain bin background removes the low-entropy content JPEG compresses best,
+   *  leaving dense card art+text. A fixed q0.8 that was safe for full frames isn't safe here.
+   *
+   *  Note: the 100KB default originated as TCGTracking's decoded-image cap. Recognition is now
+   *  local (CLIP, which downsamples to 224x224 anyway), so this is no longer a hard external
+   *  constraint — it's kept because it's the size every validation run to date was measured at.
+   *  Configurable per rig rather than hardcoded, so raising it is a one-line experiment. */
+  function canvasToBlobUnderCap(canvas, maxBytes) {
+    const qualities = [0.8, 0.7, 0.6, 0.5, 0.4];
+    return new Promise((resolve) => {
+      let i = 0;
+      const tryNext = () => {
+        canvas.toBlob((blob) => {
+          if (!blob || blob.size <= maxBytes || i === qualities.length - 1) { resolve(blob); return; }
+          i++;
+          tryNext();
+        }, 'image/jpeg', qualities[i]);
+      };
+      tryNext();
+    });
+  }
+
+  // ═══════════════════════ THUMBNAIL PREVIEW ═══════════════════════════
+
+  /** Renders the exact bytes POSTed for recognition — deliberately NOT a re-draw from the video
+   *  element, which could look fine on screen while the raw captured buffer is rotated or
+   *  mis-cropped (a known getUserMedia + canvas.drawImage orientation gotcha on some mobile
+   *  browsers). Revokes the previous object URL so a long run doesn't leak memory. */
+  class ThumbPreview {
+    constructor({ container, img, downloadLink }) {
+      this.container = container;
+      this.img = img;
+      this.downloadLink = downloadLink;
+      this.lastUrl = null;
+    }
+
+    show(blob) {
+      if (this.lastUrl) URL.revokeObjectURL(this.lastUrl);
+      this.lastUrl = URL.createObjectURL(blob);
+      if (this.container) this.container.hidden = false;
+      if (this.img) this.img.src = this.lastUrl;
+      if (this.downloadLink) {
+        this.downloadLink.href = this.lastUrl;
+        this.downloadLink.download = 'capture-' + Date.now() + '.jpg'; // unique per save, not per card
+      }
+    }
+  }
+
+  // ═══════════════════════ CAPTURE RIG ═══════════════════════════
+
+  // Client-side capture state machine — see plan "Client state machine":
+  // IDLE -> ARMED -> CHANGING -> STABLE -> SCANNING -> DECIDED -> WAIT_CLEAR -> ARMED, + STALLED.
+  // ARMED/WAIT_CLEAR both watch for frame-diff; the difference is only which transition a
+  // detected change leads to (a new card arriving vs. the just-decided card being routed away).
+  const S = {
+    IDLE: 'idle', ARMED: 'armed', CHANGING: 'changing', SCANNING: 'scanning',
+    WAIT_CLEAR: 'wait_clear', STALLED: 'stalled', DONE: 'done',
+  };
+
+  class CaptureRig {
+    /**
+     * @param {object} opts
+     * @param {HTMLVideoElement} opts.video       live camera element
+     * @param {HTMLElement}     [opts.cropGuide]  overlay box redrawn whenever settings change
+     * @param {object}           opts.settings    AppSettings (crop + timing knobs)
+     * @param {function}         opts.onCapture   (blob) => void — called the instant a capture
+     *                                            is encoded, BEFORE any upload. Do the upload here.
+     * @param {function}        [opts.onHopperEmpty] () => void — no activity for hopperEmptyTimeoutMs
+     * @param {function}        [opts.onStateChange] (state) => void
+     * @param {number}          [opts.maxUploadBytes]
+     */
+    constructor(opts) {
+      this.video = opts.video;
+      this.cropGuide = opts.cropGuide || null;
+      this.onCapture = opts.onCapture;
+      this.onHopperEmpty = opts.onHopperEmpty || (() => {});
+      this.onStateChange = opts.onStateChange || (() => {});
+      this.maxUploadBytes = opts.maxUploadBytes ?? MAX_UPLOAD_BYTES;
+
+      this.state = S.IDLE;
+      this.stream = null;
+      this.loopTimer = null;
+      this.prevGray = null;    // Uint8ClampedArray from the last diff-canvas sample
+      this.stableCount = 0;
+      this.lastActivityAt = 0; // resets the hopper-empty timer whenever something is happening
+      this.lastBlob = null;
+
+      this.diffCanvas = document.createElement('canvas');
+      this.diffCanvas.width = 64;
+      this.diffCanvas.height = 48;
+      this.diffCtx = this.diffCanvas.getContext('2d', { willReadFrequently: true });
+      this.captureCanvas = document.createElement('canvas');
+      this.captureCtx = this.captureCanvas.getContext('2d');
+
+      this.updateSettings(opts.settings);
+    }
+
+    /** Every place settings change (initial load, Calibrate save, raw Settings save) must
+     *  recompute the crop through here, so the on-screen guide and the actual capture crop
+     *  never drift from what was saved. */
+    updateSettings(settings) {
+      this.settings = settings;
+      this.crop = getCrop(settings);
+      if (this.cropGuide) renderCropGuide(this.cropGuide, this.crop);
+    }
+
+    _setState(next) {
+      this.state = next;
+      this.onStateChange(next);
+    }
+
+    /** Opens the camera and arms the loop. Throws on camera failure so the caller can render a
+     *  mode-appropriate error — getUserMedia needs a secure context (HTTPS or localhost). */
+    async start() {
+      this.stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: 'environment' } }, audio: false,
+      });
+      this.video.srcObject = this.stream;
+      await this.video.play();
+      if (this.cropGuide) renderCropGuide(this.cropGuide, this.crop);
+
+      this.lastActivityAt = Date.now();
+      this.prevGray = null;
+      this._setState(S.ARMED);
+      this.loopTimer = setInterval(() => this._tick(), this.settings.captureIntervalMs);
+    }
+
+    stop() {
+      if (this.loopTimer) { clearInterval(this.loopTimer); this.loopTimer = null; }
+      if (this.stream) { this.stream.getTracks().forEach((t) => t.stop()); this.stream = null; }
+    }
+
+    /** Call after a scan resolves successfully — waits for the decided card to physically clear
+     *  the frame before arming for the next one. */
+    rearm() { this._setState(S.WAIT_CLEAR); }
+
+    /** Call when a scan fails. Deliberately does NOT re-arm: the card is still sitting on the
+     *  machine holding for a tone that was never sent, so nothing is lost by pausing. */
+    stall() { this._setState(S.STALLED); }
+
+    markDone() { this._setState(S.DONE); }
+
+    isDone() { return this.state === S.DONE; }
+
+    _sampleGray() {
+      // Diff only inside the crop — see plan/calibration finding: motion outside the capture
+      // window (bin walls, hands passing by) isn't a card arriving and shouldn't arm a capture.
+      const { sx, sy, sw, sh } = cropRectPx(this.video.videoWidth, this.video.videoHeight, this.crop);
+      this.diffCtx.drawImage(this.video, sx, sy, sw, sh, 0, 0, this.diffCanvas.width, this.diffCanvas.height);
+      const data = this.diffCtx.getImageData(0, 0, this.diffCanvas.width, this.diffCanvas.height).data;
+      const gray = new Uint8ClampedArray(this.diffCanvas.width * this.diffCanvas.height);
+      for (let i = 0, p = 0; i < data.length; i += 4, p++) {
+        gray[p] = (data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114) | 0;
+      }
+      return gray;
+    }
+
+    _tick() {
+      if (this.state === S.SCANNING || this.state === S.DONE || this.state === S.STALLED) return;
+      if (!this.video.videoWidth) return;
+
+      const gray = this._sampleGray();
+      const diff = this.prevGray ? meanAbsDiff(gray, this.prevGray) : 0;
+      this.prevGray = gray;
+      const changed = diff > this.settings.frameDiffThreshold;
+
+      if (this.state === S.ARMED) {
+        if (changed) {
+          this._setState(S.CHANGING);
+          this.stableCount = 0;
+          this.lastActivityAt = Date.now();
+        } else if (Date.now() - this.lastActivityAt > this.settings.hopperEmptyTimeoutMs) {
+          this.onHopperEmpty();
+        }
+        return;
+      }
+
+      if (this.state === S.CHANGING) {
+        this.lastActivityAt = Date.now();
+        if (changed) { this.stableCount = 0; return; }
+        this.stableCount++;
+        if (this.stableCount >= this.settings.stableFrames) this._triggerCapture();
+        return;
+      }
+
+      if (this.state === S.WAIT_CLEAR) {
+        if (changed) { this._setState(S.ARMED); this.lastActivityAt = Date.now(); }
+        return;
+      }
+    }
+
+    async _triggerCapture() {
+      this._setState(S.SCANNING);
+
+      const { sx, sy, sw, sh } = cropRectPx(this.video.videoWidth, this.video.videoHeight, this.crop);
+      const w = Math.min(sw, 640);
+      const h = Math.round(w * (sh / sw));
+      this.captureCanvas.width = w;
+      this.captureCanvas.height = h;
+      this.captureCtx.drawImage(this.video, sx, sy, sw, sh, 0, 0, w, h);
+      const blob = await canvasToBlobUnderCap(this.captureCanvas, this.maxUploadBytes);
+      this.lastBlob = blob;
+      this.onCapture(blob);
+    }
+  }
+
+  function meanAbsDiff(a, b) {
+    let sum = 0;
+    for (let i = 0; i < a.length; i++) sum += Math.abs(a[i] - b[i]);
+    return sum / a.length;
+  }
+
+  return { api, getCrop, renderCropGuide, cropRectPx, canvasToBlobUnderCap, ThumbPreview, CaptureRig, STATE: S, MAX_UPLOAD_BYTES };
+})();

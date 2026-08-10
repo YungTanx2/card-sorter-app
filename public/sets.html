@@ -1,0 +1,922 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+<title>Set Builder</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg: #0f1117;
+    --surface: #1a1d27;
+    --surface2: #222636;
+    --border: #2d3148;
+    --text: #e2e8f0;
+    --muted: #8892a4;
+    --accent: #6366f1;
+    --green: #22c55e;
+    --red: #ef4444;
+    --yellow: #eab308;
+  }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: var(--bg); color: var(--text); min-height: 100vh;
+    display: flex; flex-direction: column;
+  }
+
+  header {
+    display: flex; align-items: center; gap: 0.5rem; padding: 0.75rem 1rem;
+    background: var(--surface); border-bottom: 1px solid var(--border);
+    position: sticky; top: 0; z-index: 10;
+  }
+  header h1 { font-size: 1rem; font-weight: 600; margin-right: auto; }
+  header nav { display: flex; gap: 0.35rem; flex-wrap: wrap; }
+  header nav button {
+    background: transparent; border: 1px solid var(--border); color: var(--muted);
+    border-radius: 6px; padding: 0.35rem 0.6rem; font-size: 0.8rem; cursor: pointer;
+  }
+  header nav button.active { color: var(--text); border-color: var(--accent); background: var(--surface2); }
+  header nav a.nav-link {
+    display: inline-flex; align-items: center; color: var(--accent); border: 1px solid var(--border);
+    border-radius: 6px; padding: 0.35rem 0.6rem; font-size: 0.8rem; text-decoration: none;
+  }
+
+  main { flex: 1; padding: 1rem; max-width: 720px; width: 100%; margin: 0 auto; }
+  section[hidden] { display: none !important; }
+  h2 { font-size: 1.05rem; margin-bottom: 0.5rem; }
+
+  label { display: block; font-size: 0.85rem; color: var(--muted); margin: 0.9rem 0 0.3rem; }
+  select, input[type=text], input[type=number] {
+    width: 100%; background: var(--surface); border: 1px solid var(--border); color: var(--text);
+    border-radius: 8px; padding: 0.6rem 0.7rem; font-size: 1rem;
+  }
+  select[multiple] { min-height: 8rem; }
+
+  button.primary {
+    width: 100%; background: var(--accent); color: white; border: none; border-radius: 10px;
+    padding: 0.9rem; font-size: 1rem; font-weight: 600; margin-top: 1.25rem; cursor: pointer;
+  }
+  button.primary:disabled { opacity: 0.5; }
+  button.secondary {
+    background: var(--surface2); color: var(--text); border: 1px solid var(--border);
+    border-radius: 8px; padding: 0.6rem 0.9rem; font-size: 0.9rem; cursor: pointer;
+  }
+  button.danger { background: var(--red); color: white; border: none; }
+
+  .row { display: flex; gap: 0.6rem; }
+  .row > * { flex: 1; }
+  .hint { font-size: 0.78rem; color: var(--muted); margin-top: 0.3rem; }
+  .error-box { background: #3a1a1a; border: 1px solid var(--red); color: #fca5a5; border-radius: 8px; padding: 0.75rem; margin-top: 0.75rem; font-size: 0.85rem; }
+
+  /* ── Goals list ─────────────────────────────────────────────── */
+  ul.goal-list { list-style: none; }
+  ul.goal-list li {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+    padding: 0.8rem; margin-bottom: 0.6rem; cursor: pointer;
+  }
+  ul.goal-list li:hover { border-color: var(--accent); }
+  .goal-name { font-weight: 600; }
+  .goal-meta { font-size: 0.75rem; color: var(--muted); margin-top: 0.15rem; }
+  .bar { height: 6px; background: var(--surface2); border-radius: 3px; margin-top: 0.5rem; overflow: hidden; }
+  .bar > i { display: block; height: 100%; background: var(--green); }
+
+  /* ── Run view ─────────────────────────────────────────────── */
+  .camera-wrap { position: relative; background: #000; border-radius: 12px; overflow: hidden; aspect-ratio: 3/4; }
+  video { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .status-banner {
+    position: absolute; inset: auto 0 0 0; padding: 1rem; text-align: center;
+    font-size: 1.4rem; font-weight: 700; color: white; letter-spacing: 0.04em;
+    background: rgba(0,0,0,0.55); transition: background-color 120ms ease;
+  }
+  .status-banner.scanning { background: rgba(234,179,8,0.75); }
+  .status-banner.needed   { background: rgba(34,197,94,0.85); }
+  .status-banner.extra    { background: rgba(239,68,68,0.85); }
+  .status-banner.stalled  { background: rgba(239,68,68,0.95); }
+  .phase-badge {
+    position: absolute; top: 0.6rem; left: 0.6rem; background: rgba(0,0,0,0.6); color: var(--yellow);
+    font-size: 0.7rem; font-weight: 600; padding: 0.25rem 0.5rem; border-radius: 6px;
+  }
+  .crop-guide {
+    position: absolute; border: 2px dashed var(--accent); border-radius: 8px;
+    pointer-events: none; box-shadow: 0 0 0 9999px rgba(0,0,0,0.45);
+  }
+  .counters { display: flex; gap: 0.6rem; margin-top: 1rem; }
+  .counter { flex: 1; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 0.7rem; text-align: center; }
+  .counter .n { font-size: 1.4rem; font-weight: 700; }
+  .counter .l { font-size: 0.72rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.03em; }
+
+  .last-card { margin-top: 0.9rem; padding: 0.7rem; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; font-size: 0.85rem; }
+  .last-card .thumb-row { display: flex; gap: 0.7rem; align-items: flex-start; }
+  .last-card img.capture-thumb { width: 4.5rem; height: 4.5rem; object-fit: cover; border-radius: 6px; border: 1px solid var(--border); background: #000; flex: none; }
+  .last-card .name { font-weight: 600; }
+  .last-card .meta { color: var(--muted); font-size: 0.78rem; margin-top: 0.15rem; }
+  .last-card .download-link { display: inline-block; margin-top: 0.3rem; color: var(--accent); font-size: 0.78rem; text-decoration: none; }
+
+  .stall-banner { margin-top: 1rem; padding: 0.9rem; background: #3a1a1a; border: 1px solid var(--red); border-radius: 10px; }
+  .stall-banner p { font-size: 0.85rem; margin-bottom: 0.6rem; }
+  .run-actions { display: flex; gap: 0.6rem; margin-top: 1rem; }
+  .run-actions button { flex: 1; }
+
+  ul.results { list-style: none; margin-top: 1rem; }
+  ul.results li { padding: 0.6rem 0; border-bottom: 1px solid var(--border); font-size: 0.85rem; display: flex; justify-content: space-between; gap: 0.5rem; align-items: center; }
+  ul.results li .tag { font-size: 0.7rem; padding: 0.1rem 0.4rem; border-radius: 4px; white-space: nowrap; }
+  ul.results li .tag.needed { background: rgba(34,197,94,0.2); color: var(--green); }
+  ul.results li .tag.extra  { background: rgba(239,68,68,0.2); color: var(--red); }
+  details summary { cursor: pointer; color: var(--muted); font-size: 0.85rem; margin-top: 1rem; }
+
+  .dry-badge {
+    display: inline-block; background: rgba(234,179,8,0.18); color: var(--yellow);
+    border: 1px solid rgba(234,179,8,0.4); border-radius: 6px;
+    padding: 0.15rem 0.45rem; font-size: 0.7rem; font-weight: 600; margin-left: 0.4rem;
+  }
+  /* An author `display` rule beats the UA stylesheet's [hidden] { display: none } no matter the
+     specificity, so any class that sets display MUST re-hide itself — otherwise toggling
+     .hidden from JS silently does nothing. Same trap section[hidden] above already handles.
+     It matters here specifically: a badge stuck on "DRY RUN" trains you to ignore it, and the
+     one run where that's wrong is a live one quietly writing to a goal. */
+  .dry-badge[hidden] { display: none; }
+
+  /* ── Binder ─────────────────────────────────────────────── */
+  .binder-nav { display: flex; align-items: center; gap: 0.6rem; margin: 0.75rem 0; }
+  .binder-nav .page-label { flex: 1; text-align: center; font-size: 0.85rem; color: var(--muted); }
+  .binder-page { display: grid; gap: 0.5rem; }
+  .pocket {
+    position: relative; aspect-ratio: 5/7; border-radius: 6px; overflow: hidden;
+    background: var(--surface); border: 1px solid var(--border);
+    display: flex; align-items: center; justify-content: center;
+  }
+  .pocket.empty { border-style: dashed; }
+  .pocket img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .pocket.empty img { opacity: 0.14; filter: grayscale(1); }
+  .pocket .num {
+    position: absolute; left: 0; right: 0; bottom: 0; padding: 0.15rem 0.25rem;
+    background: rgba(0,0,0,0.7); font-size: 0.6rem; text-align: center;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .pocket .have {
+    position: absolute; top: 0.2rem; right: 0.2rem; background: rgba(34,197,94,0.9);
+    color: #04210f; font-size: 0.6rem; font-weight: 700; border-radius: 4px; padding: 0.05rem 0.25rem;
+  }
+  .pocket.blank { background: transparent; border: none; }
+
+  /* ── Review strip ─────────────────────────────────────────── */
+  ul.review { list-style: none; }
+  ul.review li {
+    display: flex; gap: 0.7rem; align-items: center; padding: 0.6rem 0;
+    border-bottom: 1px solid var(--border);
+  }
+  ul.review li.voided { opacity: 0.45; }
+  ul.review img { width: 3.6rem; border-radius: 5px; border: 1px solid var(--border); background: #000; flex: none; }
+  ul.review .who { flex: 1; font-size: 0.85rem; }
+  ul.review .who .sub { color: var(--muted); font-size: 0.75rem; margin-top: 0.1rem; }
+  .vs { color: var(--muted); font-size: 0.7rem; flex: none; }
+
+  ol.filing { list-style: none; counter-reset: f; }
+  ol.filing li {
+    display: flex; gap: 0.6rem; align-items: center; padding: 0.55rem 0;
+    border-bottom: 1px solid var(--border); font-size: 0.88rem;
+  }
+  ol.filing li .slot {
+    flex: none; background: var(--surface2); border: 1px solid var(--border); border-radius: 6px;
+    padding: 0.25rem 0.45rem; font-size: 0.72rem; font-weight: 600; min-width: 5.2rem; text-align: center;
+  }
+  ol.filing li .cardno { flex: none; color: var(--muted); font-size: 0.75rem; min-width: 3.5rem; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Set Builder</h1>
+  <nav>
+    <button data-view="goals" class="active">Goals</button>
+    <button data-view="new">New</button>
+    <button data-view="run">Run</button>
+    <button data-view="binder">Binder</button>
+    <button data-view="missing">Missing</button>
+    <a class="nav-link" href="/">← Sorter</a>
+  </nav>
+</header>
+
+<main>
+
+  <!-- ══════════════════════ GOALS ══════════════════════ -->
+  <section id="view-goals">
+    <h2>Your goals</h2>
+    <p class="hint">A goal is one printing of one set, built up over as many piles as it takes. Progress is derived from every scan you've ever committed to it — nothing is stored as a counter, so voiding a bad match in the review strip un-fills its slot immediately.</p>
+    <ul class="goal-list" id="goal-list"></ul>
+    <div id="goals-empty" class="hint" hidden>No goals yet — create one under <strong>New</strong>.</div>
+  </section>
+
+  <!-- ══════════════════════ NEW GOAL ══════════════════════ -->
+  <section id="view-new" hidden>
+    <h2>New goal</h2>
+
+    <label for="goal-name">Name</label>
+    <input type="text" id="goal-name" placeholder="e.g. Attack of the Vine! master set" />
+
+    <label for="game-select">Game</label>
+    <select id="game-select"></select>
+
+    <label for="set-select">Set(s) — required</label>
+    <select id="set-select" multiple></select>
+    <p class="hint">Usually one. Selecting several builds one goal spanning them, ordered the way you picked them.</p>
+
+    <div class="row">
+      <div>
+        <label for="variant-select">Printing</label>
+        <select id="variant-select"></select>
+      </div>
+      <div>
+        <label for="target-input">Copies of each card</label>
+        <input type="number" id="target-input" min="1" step="1" value="1" />
+      </div>
+    </div>
+    <p class="hint">1 = master set, 4 = play set. The printing can't be detected from a photo — split foils out of the pile by hand and run each as its own goal.</p>
+
+    <label for="rarity-select">Exclude rarities <span id="rarity-count" class="hint" style="display:inline"></span></label>
+    <select id="rarity-select" multiple></select>
+    <p class="hint">Excluded rarities leave the binder entirely — no permanent holes. For a play set, exclude the chase rarities you were never going to get four of.</p>
+
+    <div class="row">
+      <div>
+        <label for="rows-input">Binder rows</label>
+        <input type="number" id="rows-input" min="1" max="8" step="1" value="3" />
+      </div>
+      <div>
+        <label for="cols-input">Binder columns</label>
+        <input type="number" id="cols-input" min="1" max="8" step="1" value="3" />
+      </div>
+    </div>
+
+    <div id="new-error"></div>
+    <button class="primary" id="create-goal-btn">Create goal</button>
+  </section>
+
+  <!-- ══════════════════════ RUN ══════════════════════ -->
+  <section id="view-run" hidden>
+    <div id="run-setup">
+      <h2 id="run-goal-name">—</h2>
+      <p class="hint" id="run-goal-meta"></p>
+
+      <label for="dryrun-select">Mode</label>
+      <select id="dryrun-select">
+        <option value="dry" selected>Dry run — log and review, don't count</option>
+        <option value="live">Live — commit to goal progress</option>
+      </select>
+      <p class="hint">Recognition has not yet been validated on physical cards under the rig. Dry run gives you the full decision, the review strip and the filing list without letting a bad match touch the goal.</p>
+
+      <div id="run-error"></div>
+      <button class="primary" id="start-run-btn">Start run</button>
+
+      <div class="run-actions">
+        <button class="secondary danger" id="delete-goal-btn">Delete goal</button>
+      </div>
+      <p class="hint">A goal's printing and target are fixed at creation — if either is wrong, delete it and start over. This removes its scan history too, since that history <em>is</em> its progress.</p>
+
+      <details id="past-sessions-wrap" hidden>
+        <summary>Past runs on this goal</summary>
+        <p class="hint">Reopen a run's filing list and review strip — filing a pile gets interrupted, and the list is useless if you can only see it once.</p>
+        <ul class="results" id="past-sessions"></ul>
+      </details>
+    </div>
+
+    <div id="run-live" hidden>
+      <div class="camera-wrap">
+        <video id="camera" playsinline autoplay muted></video>
+        <div class="crop-guide" id="run-crop-guide"></div>
+        <div class="phase-badge" id="run-phase-badge">Phase 1 — visual only, no tone</div>
+        <div class="status-banner" id="status-banner">ARMED</div>
+      </div>
+
+      <div class="counters">
+        <div class="counter"><div class="n" id="count-total">0</div><div class="l">Cards</div></div>
+        <div class="counter"><div class="n" id="count-needed">0</div><div class="l">Needed</div></div>
+        <div class="counter"><div class="n" id="count-extra">0</div><div class="l">Extra</div></div>
+        <div class="counter"><div class="n" id="count-filled">0</div><div class="l">Slots filled</div></div>
+      </div>
+
+      <div class="last-card" id="last-card" hidden>
+        <div class="thumb-row">
+          <img class="capture-thumb" id="last-card-thumb" alt="Last capture — exactly what was uploaded for recognition" />
+          <div>
+            <div class="name" id="last-card-name"></div>
+            <div class="meta" id="last-card-meta"></div>
+            <a class="download-link" id="last-card-download" download="capture.jpg">Save last capture</a>
+          </div>
+        </div>
+      </div>
+
+      <div class="stall-banner" id="stall-banner" hidden>
+        <p><strong>Stalled.</strong> Recognition couldn't reach a decision — the machine should still be holding this card, waiting for a tone that hasn't been sent. Retry below.</p>
+        <button class="secondary" id="retry-scan-btn" style="width:100%">Retry scan</button>
+      </div>
+
+      <div class="run-actions">
+        <button class="secondary danger" id="finish-run-btn">Finish run</button>
+      </div>
+
+      <details open>
+        <summary>Recent cards</summary>
+        <ul class="results" id="results-list"></ul>
+      </details>
+    </div>
+
+    <div id="run-done" hidden>
+      <h2>Run complete <span id="done-dry-badge" class="dry-badge" hidden>DRY RUN</span></h2>
+      <div class="counters">
+        <div class="counter"><div class="n" id="done-total">0</div><div class="l">Cards</div></div>
+        <div class="counter"><div class="n" id="done-needed">0</div><div class="l">Needed</div></div>
+        <div class="counter"><div class="n" id="done-extra">0</div><div class="l">Extra</div></div>
+      </div>
+
+      <h2 style="margin-top:1.5rem;">Filing list</h2>
+      <p class="hint">The needed pile in the order the machine dropped it — pick the stack up and work top to bottom. No sorting, no reading card numbers.</p>
+      <ol class="filing" id="filing-list"></ol>
+
+      <h2 style="margin-top:1.5rem;">Review</h2>
+      <p class="hint">Your capture next to the card it was matched to. Tap <em>Wrong</em> on any mismatch — that un-fills the slot immediately, and drops the card from the filing list above.</p>
+      <ul class="review" id="review-list"></ul>
+
+      <button class="primary" id="back-to-goals-btn">Back to goals</button>
+    </div>
+  </section>
+
+  <!-- ══════════════════════ BINDER ══════════════════════ -->
+  <section id="view-binder" hidden>
+    <h2 id="binder-goal-name">—</h2>
+    <p class="hint" id="binder-summary"></p>
+    <div class="binder-nav">
+      <button class="secondary" id="binder-prev">‹ Prev</button>
+      <div class="page-label" id="binder-page-label"></div>
+      <button class="secondary" id="binder-next">Next ›</button>
+    </div>
+    <div class="binder-page" id="binder-page"></div>
+  </section>
+
+  <!-- ══════════════════════ MISSING ══════════════════════ -->
+  <section id="view-missing" hidden>
+    <h2 id="missing-goal-name">—</h2>
+    <p class="hint" id="missing-summary"></p>
+    <ul class="results" id="missing-list"></ul>
+  </section>
+
+</main>
+
+<script src="/capture.js"></script>
+<script>
+(function () {
+  'use strict';
+
+  // Camera stack is shared with the price-sorter page (index.html) — see capture.js.
+  const { api, ThumbPreview, CaptureRig } = window.CardSorterCapture;
+
+  const $ = (id) => document.getElementById(id);
+  const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+  // ── state ────────────────────────────────────────────────────
+  let appSettings = null;
+  let goals = [];
+  let currentGoal = null;      // the goal every non-list view is scoped to
+  let currentProgress = null;  // last fetched GoalProgress for currentGoal
+  let goalSession = null;
+  let rig = null;
+  let thumb = null;
+  let counts = { total: 0, needed: 0, extra: 0 };
+  let binderPage = 1;
+
+  // ── router ───────────────────────────────────────────────────
+  const views = ['goals', 'new', 'run', 'binder', 'missing'];
+  let currentViewName = 'goals';
+
+  function showView(name) {
+    // Leaving Run mid-session would otherwise leave the camera pinned by a hidden tab.
+    if (currentViewName === 'run' && name !== 'run' && rig) { rig.stop(); rig = null; }
+    currentViewName = name;
+    views.forEach((v) => { const el = $('view-' + v); if (el) el.hidden = v !== name; });
+    document.querySelectorAll('header nav button').forEach((b) => b.classList.toggle('active', b.dataset.view === name));
+  }
+
+  document.querySelectorAll('header nav button').forEach((b) => {
+    b.addEventListener('click', async () => {
+      const v = b.dataset.view;
+      // Every view except Goals/New needs a goal in hand. Bounce rather than render an empty shell.
+      if ((v === 'run' || v === 'binder' || v === 'missing') && !currentGoal) {
+        showView('goals');
+        return;
+      }
+      showView(v);
+      if (v === 'new') await loadNewGoalForm();
+      if (v === 'run') showRunSetup();
+      if (v === 'binder') await renderBinder();
+      if (v === 'missing') await renderMissing();
+    });
+  });
+
+  // ═══════════════════════ GOALS LIST ═══════════════════════════
+
+  async function loadGoals() {
+    goals = await api('/api/goals');
+    const list = $('goal-list');
+    $('goals-empty').hidden = goals.length > 0;
+    list.innerHTML = '';
+
+    for (const g of goals) {
+      // One progress call per goal. Fine at the handful-of-goals scale this tool operates at;
+      // if it ever isn't, the fix is a summary endpoint, not a stored counter.
+      let p = null;
+      try { p = await api('/api/goals/' + g.id + '/progress'); } catch (e) { /* show the goal anyway */ }
+      const pct = p && p.totalSlots ? Math.round((p.filledSlots / p.totalSlots) * 100) : 0;
+      const li = document.createElement('li');
+      li.innerHTML =
+        `<div class="goal-name">${esc(g.name)}</div>` +
+        `<div class="goal-meta">${esc(g.gameName)} · ${esc(g.variant)} · ${g.targetCopies}× each` +
+        (g.excludedRarities.length ? ` · excl ${esc(g.excludedRarities.join(', '))}` : '') +
+        `</div>` +
+        (p ? `<div class="goal-meta">${p.filledSlots} / ${p.totalSlots} slots · ${pct}%</div>
+              <div class="bar"><i style="width:${pct}%"></i></div>` : '');
+      li.addEventListener('click', () => selectGoal(g));
+      list.appendChild(li);
+    }
+  }
+
+  async function selectGoal(goal) {
+    currentGoal = goal;
+    currentProgress = await api('/api/goals/' + goal.id + '/progress');
+    binderPage = 1;
+    showRunSetup();
+    showView('run');
+  }
+
+  // ═══════════════════════ NEW GOAL ═════════════════════════════
+
+  let newFormLoaded = false;
+
+  async function loadNewGoalForm() {
+    if (newFormLoaded) return;
+    const games = await api('/api/games');
+    $('game-select').innerHTML = games.map((g) => `<option value="${g.id}" data-name="${esc(g.displayName)}">${esc(g.displayName)}</option>`).join('');
+    await onGameChange();
+    newFormLoaded = true;
+  }
+
+  async function onGameChange() {
+    const gameId = Number($('game-select').value);
+    const sets = await api('/api/sets?game_id=' + gameId);
+    $('set-select').innerHTML = sets.map((s) => `<option value="${s.id}">${esc(s.name)}${s.abbreviation ? ' (' + esc(s.abbreviation) + ')' : ''}</option>`).join('');
+    await refreshSetVocab();
+  }
+
+  /** Printing + rarity vocabularies are read off the set's own data, never a per-game hardcoded
+   *  table — Lorcana's rarities ("Enchanted") and Pokemon's ("Illustration Rare") share nothing. */
+  async function refreshSetVocab() {
+    const gameId = Number($('game-select').value);
+    const setSelect = $('set-select');
+    const selected = Array.from(setSelect.selectedOptions).map((o) => Number(o.value));
+    const sampleSetId = selected[0] ?? Number(setSelect.options[0] && setSelect.options[0].value);
+    if (!sampleSetId) return;
+
+    $('rarity-count').textContent = '(loading…)';
+    try {
+      const { variants } = await api(`/api/variants?game_id=${gameId}&set_id=${sampleSetId}`);
+      $('variant-select').innerHTML = variants.map((v) => `<option value="${esc(v)}">${esc(v)}</option>`).join('');
+      const rarities = await api(`/api/rarities?game_id=${gameId}&set_id=${sampleSetId}`);
+      $('rarity-select').innerHTML = rarities.map((r) => `<option value="${esc(r)}">${esc(r)}</option>`).join('');
+      $('rarity-count').textContent = `(${rarities.length} in this set)`;
+    } catch (err) {
+      $('new-error').innerHTML = `<div class="error-box">Couldn't load set details: ${esc(err.message)}</div>`;
+      $('rarity-count').textContent = '';
+    }
+  }
+
+  $('game-select').addEventListener('change', onGameChange);
+  $('set-select').addEventListener('change', refreshSetVocab);
+
+  $('create-goal-btn').addEventListener('click', async () => {
+    $('new-error').innerHTML = '';
+    const gameSelect = $('game-select');
+    const setIds = Array.from($('set-select').selectedOptions).map((o) => Number(o.value));
+    if (setIds.length === 0) {
+      $('new-error').innerHTML = '<div class="error-box">Select at least one set.</div>';
+      return;
+    }
+
+    const body = {
+      name: $('goal-name').value.trim() || 'Untitled goal',
+      gameId: Number(gameSelect.value),
+      gameName: gameSelect.options[gameSelect.selectedIndex].dataset.name,
+      setIds,
+      variant: $('variant-select').value,
+      targetCopies: Number($('target-input').value) || 1,
+      excludedRarities: Array.from($('rarity-select').selectedOptions).map((o) => o.value),
+      binderRows: Number($('rows-input').value) || 3,
+      binderCols: Number($('cols-input').value) || 3,
+    };
+
+    // Creating a goal pre-warms catalog + embeddings for every scoped set, exactly like starting
+    // a sorter run — instant on a set either mode has seen, up to a minute on a brand-new one.
+    const btn = $('create-goal-btn');
+    btn.disabled = true;
+    btn.textContent = 'Preparing set… (first time on a new set can take a minute)';
+    try {
+      const goal = await api('/api/goals', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      await loadGoals();
+      await selectGoal(goal);
+    } catch (err) {
+      $('new-error').innerHTML = `<div class="error-box">${esc(err.message)}</div>`;
+    } finally {
+      btn.disabled = false;
+      btn.textContent = 'Create goal';
+    }
+  });
+
+  // ═══════════════════════ RUN ══════════════════════════════════
+
+  function showRunSetup() {
+    if (!currentGoal) return;
+    $('run-setup').hidden = false;
+    $('run-live').hidden = true;
+    $('run-done').hidden = true;
+    $('run-goal-name').textContent = currentGoal.name;
+    const p = currentProgress;
+    $('run-goal-meta').textContent =
+      `${currentGoal.gameName} · ${currentGoal.variant} · ${currentGoal.targetCopies}× each` +
+      (p ? ` — ${p.filledSlots} of ${p.totalSlots} slots filled` : '');
+    loadPastSessions();
+  }
+
+  /** Two-step confirm rather than window.confirm(): a native modal blocks the page entirely,
+   *  which is both worse on a phone mid-run and impossible to drive from automation. */
+  let deleteArmed = false;
+  $('delete-goal-btn').addEventListener('click', async () => {
+    const btn = $('delete-goal-btn');
+    if (!deleteArmed) {
+      deleteArmed = true;
+      btn.textContent = 'Really delete — tap again';
+      setTimeout(() => { deleteArmed = false; btn.textContent = 'Delete goal'; }, 5000);
+      return;
+    }
+    deleteArmed = false;
+    btn.disabled = true;
+    try {
+      await api('/api/goals/' + currentGoal.id, { method: 'DELETE' });
+      currentGoal = null;
+      currentProgress = null;
+      await loadGoals();
+      showView('goals');
+    } catch (err) {
+      $('run-error').innerHTML = `<div class="error-box">${esc(err.message)}</div>`;
+    } finally {
+      btn.disabled = false;
+      btn.textContent = 'Delete goal';
+    }
+  });
+
+  async function loadPastSessions() {
+    const ul = $('past-sessions');
+    const wrap = $('past-sessions-wrap');
+    try {
+      const { sessions } = await api('/api/goals/' + currentGoal.id);
+      wrap.hidden = sessions.length === 0;
+      ul.innerHTML = '';
+      for (const s of sessions) {
+        const li = document.createElement('li');
+        li.innerHTML =
+          `<span>${new Date(s.createdAt).toLocaleString()}<br>` +
+          `<span class="hint">${esc(s.status)}</span></span>` +
+          `<span class="tag ${s.dryRun ? 'extra' : 'needed'}">${s.dryRun ? 'dry run' : 'live'}</span>`;
+        li.style.cursor = 'pointer';
+        li.addEventListener('click', () => openPastSession(s));
+        ul.appendChild(li);
+      }
+    } catch (err) {
+      wrap.hidden = true;
+    }
+  }
+
+  /** Reopens a finished run's filing list + review strip. Same view the run ends on, rebuilt
+   *  from the server rather than from in-memory counters, so it works after a reload. */
+  async function openPastSession(session) {
+    goalSession = session;
+    const detail = await api('/api/goal-session/' + session.id);
+    const cards = detail.cards;
+    counts = {
+      total: cards.length,
+      needed: cards.filter((c) => c.outcome === 'needed').length,
+      extra: cards.filter((c) => c.outcome === 'extra').length,
+    };
+    $('run-setup').hidden = true;
+    $('run-live').hidden = true;
+    $('run-done').hidden = false;
+    $('done-dry-badge').hidden = !session.dryRun;
+    $('done-total').textContent = counts.total;
+    $('done-needed').textContent = counts.needed;
+    $('done-extra').textContent = counts.extra;
+    await refreshGoalProgress();
+    await renderFilingList();
+    await renderReviewStrip();
+  }
+
+  function setBanner(cls, text) {
+    const b = $('status-banner');
+    b.className = 'status-banner ' + cls;
+    b.textContent = text;
+  }
+
+  /** Phase 1 stub, identical in intent to the price-sorter's: the banner flash IS the signal
+   *  until the X1PRO exists. Phase 2 swaps this for Web Audio tones without touching the state
+   *  machine in capture.js above it. */
+  const ToneEmitter = {
+    async emit(outcome) {
+      setBanner(outcome, outcome === 'needed' ? 'NEEDED' : 'EXTRA');
+      await new Promise((r) => setTimeout(r, 700));
+    },
+  };
+
+  $('start-run-btn').addEventListener('click', async () => {
+    $('run-error').innerHTML = '';
+    const dryRun = $('dryrun-select').value !== 'live';
+    try {
+      goalSession = await api('/api/goals/' + currentGoal.id + '/session', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ dryRun }),
+      });
+    } catch (err) {
+      $('run-error').innerHTML = `<div class="error-box">${esc(err.message)}</div>`;
+      return;
+    }
+
+    counts = { total: 0, needed: 0, extra: 0 };
+    $('results-list').innerHTML = '';
+    $('last-card').hidden = true;
+    $('run-setup').hidden = true;
+    $('run-live').hidden = false;
+    $('run-phase-badge').textContent = dryRun
+      ? 'DRY RUN — nothing is counted toward the goal'
+      : 'LIVE — scans commit to goal progress';
+    updateCounters();
+
+    thumb = new ThumbPreview({ container: $('last-card'), img: $('last-card-thumb'), downloadLink: $('last-card-download') });
+    rig = new CaptureRig({
+      video: $('camera'),
+      cropGuide: $('run-crop-guide'),
+      settings: appSettings,
+      onHopperEmpty: () => finishRun(true),
+      onCapture: (blob) => {
+        setBanner('scanning', 'SCANNING…');
+        thumb.show(blob);
+        submitScan(blob);
+      },
+    });
+
+    try {
+      await rig.start();
+    } catch (err) {
+      setBanner('stalled', 'CAMERA ERROR');
+      $('stall-banner').hidden = false;
+      $('stall-banner').querySelector('p').textContent =
+        'Camera access failed: ' + err.message + '. getUserMedia needs a secure context — open this over HTTPS (Railway) or on localhost.';
+      return;
+    }
+    setBanner('armed', 'ARMED');
+  });
+
+  async function submitScan(blob) {
+    const form = new FormData();
+    form.append('image', blob, 'capture.jpg');
+    try {
+      const result = await api('/api/goal-session/' + goalSession.id + '/scan', { method: 'POST', body: form });
+      $('stall-banner').hidden = true;
+      await ToneEmitter.emit(result.outcome);
+      recordResult(result);
+      rig.rearm();
+      setBanner('armed', 'ARMED');
+    } catch (err) {
+      // Same contract as the price-sorter: never guess-route. The machine is still holding
+      // this card, waiting on a tone we're deliberately not sending.
+      rig.stall();
+      setBanner('stalled', 'STALLED');
+      $('stall-banner').hidden = false;
+      $('stall-banner').querySelector('p').textContent =
+        'Scan failed: ' + err.message + ' — the machine should still be holding this card. Fix your connection, then retry.';
+    }
+  }
+
+  $('retry-scan-btn').addEventListener('click', async () => {
+    if (!rig || !rig.lastBlob) return;
+    try { await api('/api/goal-session/' + goalSession.id + '/resume', { method: 'POST' }); } catch (e) { /* best effort */ }
+    setBanner('scanning', 'SCANNING…');
+    await submitScan(rig.lastBlob);
+  });
+
+  const REASON_TEXT = {
+    'fills-slot': 'fills a slot',
+    'slot-filled': 'already have enough',
+    'excluded-rarity': 'excluded rarity',
+    'not-a-set-slot': 'not a set slot',
+    'low-confidence': 'not confident — left in extras',
+  };
+
+  function recordResult(result) {
+    counts.total++;
+    counts[result.outcome]++;
+    updateCounters();
+
+    const card = result.card;
+    const score = card.score != null ? card.score.toFixed(3) : '—';
+    const gap = (card.score != null && card.runnerUpScore != null) ? (card.score - card.runnerUpScore).toFixed(3) : '—';
+    const owned = result.owned != null ? ` · ${result.owned}/${result.target}` : '';
+
+    $('last-card').hidden = false;
+    $('last-card-name').textContent = card.name || '(unrecognized)';
+    $('last-card-meta').textContent =
+      `${result.outcome.toUpperCase()} · ${REASON_TEXT[result.reason] || result.reason} · score ${score} · gap ${gap}${owned}`;
+
+    const li = document.createElement('li');
+    li.innerHTML =
+      `<span>${esc(card.name || '(unrecognized)')}${card.number ? ' <span class="hint">' + esc(card.number) + '</span>' : ''}</span>` +
+      `<span class="tag ${result.outcome}">${esc(result.outcome)}</span>`;
+    $('results-list').prepend(li);
+  }
+
+  function updateCounters() {
+    $('count-total').textContent = counts.total;
+    $('count-needed').textContent = counts.needed;
+    $('count-extra').textContent = counts.extra;
+    $('count-filled').textContent = currentProgress ? currentProgress.filledSlots : '—';
+  }
+
+  $('finish-run-btn').addEventListener('click', () => finishRun(false));
+
+  async function finishRun(auto) {
+    if (!rig || rig.isDone()) return;
+    rig.markDone();
+    rig.stop();
+    try { await api('/api/goal-session/' + goalSession.id + '/complete', { method: 'POST' }); } catch (e) { /* best effort */ }
+
+    $('run-live').hidden = true;
+    $('run-done').hidden = false;
+    $('done-dry-badge').hidden = !goalSession.dryRun;
+    $('done-total').textContent = counts.total;
+    $('done-needed').textContent = counts.needed;
+    $('done-extra').textContent = counts.extra;
+
+    await refreshGoalProgress();
+    await renderFilingList();
+    await renderReviewStrip();
+  }
+
+  async function refreshGoalProgress() {
+    currentProgress = await api('/api/goals/' + currentGoal.id + '/progress');
+  }
+
+  $('back-to-goals-btn').addEventListener('click', async () => {
+    await loadGoals();
+    showView('goals');
+  });
+
+  // ═══════════════════════ FILING LIST ══════════════════════════
+
+  async function renderFilingList() {
+    const entries = await api('/api/goal-session/' + goalSession.id + '/filing-list');
+    const ol = $('filing-list');
+    ol.innerHTML = '';
+    if (entries.length === 0) {
+      ol.innerHTML = '<li class="hint">Nothing to file — no card in this run filled a slot.</li>';
+      return;
+    }
+    for (const e of entries) {
+      const li = document.createElement('li');
+      li.innerHTML =
+        `<span class="slot">p${e.page ?? '?'} · pkt ${e.pocket ?? '?'}</span>` +
+        `<span class="cardno">${esc(e.card.number || '—')}</span>` +
+        `<span>${esc(e.card.name || '(unrecognized)')}</span>`;
+      ol.appendChild(li);
+    }
+  }
+
+  // ═══════════════════════ REVIEW STRIP ═════════════════════════
+
+  async function renderReviewStrip() {
+    const entries = await api('/api/goal-session/' + goalSession.id + '/review');
+    const ul = $('review-list');
+    ul.innerHTML = '';
+    if (entries.length === 0) {
+      ul.innerHTML = '<li class="hint">No accepted cards in this run.</li>';
+      return;
+    }
+    for (const e of entries) ul.appendChild(reviewRow(e));
+  }
+
+  function reviewRow(entry) {
+    const li = document.createElement('li');
+    if (entry.card.voided) li.classList.add('voided');
+
+    const capture = entry.card.hasThumb
+      ? `<img src="/api/goal-card/${entry.card.id}/thumb" alt="Your capture" />`
+      : '<div class="hint">no capture</div>';
+    const reference = entry.referenceImageUrl
+      ? `<img src="${esc(entry.referenceImageUrl)}" alt="Reference" />`
+      : '<div class="hint">no reference</div>';
+
+    li.innerHTML =
+      capture + '<span class="vs">vs</span>' + reference +
+      `<div class="who"><div>${esc(entry.card.name || '(unrecognized)')}</div>` +
+      `<div class="sub">${esc(entry.card.number || '')} · score ${entry.card.score != null ? entry.card.score.toFixed(3) : '—'}` +
+      (entry.card.voided ? ' · <strong>voided</strong>' : '') + `</div></div>`;
+
+    const btn = document.createElement('button');
+    btn.className = 'secondary' + (entry.card.voided ? '' : ' danger');
+    btn.textContent = entry.card.voided ? 'Restore' : 'Wrong';
+    btn.addEventListener('click', async () => {
+      btn.disabled = true;
+      await api('/api/goal-card/' + entry.card.id + '/void', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ voided: !entry.card.voided }),
+      });
+      // Voiding changes derived counts and therefore the filing list too — re-render both
+      // rather than patching the DOM, so what's on screen always matches the server.
+      await refreshGoalProgress();
+      await renderFilingList();
+      await renderReviewStrip();
+    });
+    li.appendChild(btn);
+    return li;
+  }
+
+  // ═══════════════════════ BINDER ═══════════════════════════════
+
+  async function renderBinder() {
+    await refreshGoalProgress();
+    const p = currentProgress;
+    $('binder-goal-name').textContent = currentGoal.name;
+    $('binder-summary').textContent =
+      `${p.filledSlots} of ${p.totalSlots} slots filled · ${currentGoal.binderRows}×${currentGoal.binderCols} pockets · ${p.pages} pages`;
+
+    const perPage = currentGoal.binderRows * currentGoal.binderCols;
+    binderPage = Math.min(Math.max(1, binderPage), Math.max(1, p.pages));
+    $('binder-page-label').textContent = `Page ${binderPage} of ${p.pages}`;
+
+    const grid = $('binder-page');
+    grid.style.gridTemplateColumns = `repeat(${currentGoal.binderCols}, 1fr)`;
+    grid.innerHTML = '';
+
+    const onPage = p.slots.filter((s) => s.page === binderPage);
+    for (let i = 0; i < perPage; i++) {
+      const slot = onPage.find((s) => s.pocket === i + 1);
+      const div = document.createElement('div');
+      if (!slot) {
+        // Trailing pockets on the last page — a real empty sleeve, not a missing card.
+        div.className = 'pocket blank';
+        grid.appendChild(div);
+        continue;
+      }
+      const have = slot.owned >= slot.target;
+      div.className = 'pocket' + (have ? '' : ' empty');
+      div.title = `${slot.number || ''} ${slot.name} — ${slot.owned}/${slot.target}`;
+      div.innerHTML =
+        (slot.imageUrl ? `<img src="${esc(slot.imageUrl)}" alt="${esc(slot.name)}" loading="lazy" />` : '') +
+        (slot.target > 1 || have ? `<span class="have">${slot.owned}/${slot.target}</span>` : '') +
+        `<span class="num">${esc(slot.number || slot.name)}</span>`;
+      grid.appendChild(div);
+    }
+  }
+
+  $('binder-prev').addEventListener('click', () => { binderPage--; renderBinder(); });
+  $('binder-next').addEventListener('click', () => { binderPage++; renderBinder(); });
+
+  // ═══════════════════════ MISSING ══════════════════════════════
+
+  async function renderMissing() {
+    const missing = await api('/api/goals/' + currentGoal.id + '/missing');
+    $('missing-goal-name').textContent = currentGoal.name;
+    $('missing-summary').textContent = `${missing.length} slot${missing.length === 1 ? '' : 's'} still open.`;
+    const ul = $('missing-list');
+    ul.innerHTML = '';
+    if (missing.length === 0) {
+      ul.innerHTML = '<li>Complete — nothing missing.</li>';
+      return;
+    }
+    for (const s of missing) {
+      const li = document.createElement('li');
+      li.innerHTML =
+        `<span>${esc(s.number || '—')} · ${esc(s.name)}<br><span class="hint">p${s.page} · pocket ${s.pocket}</span></span>` +
+        `<span class="tag extra">${s.owned}/${s.target}</span>`;
+      ul.appendChild(li);
+    }
+  }
+
+  // ═══════════════════════ boot ═════════════════════════════════
+
+  (async function boot() {
+    try {
+      appSettings = await api('/api/settings');
+      await loadGoals();
+    } catch (err) {
+      $('goal-list').innerHTML = `<li class="error-box">Failed to load: ${esc(err.message)}</li>`;
+    }
+  })();
+})();
+</script>
+</body>
+</html>

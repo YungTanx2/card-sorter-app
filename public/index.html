@@ -47,6 +47,10 @@
     border-radius: 6px; padding: 0.35rem 0.6rem; font-size: 0.8rem; cursor: pointer;
   }
   header nav button.active { color: var(--text); border-color: var(--accent); background: var(--surface2); }
+  header nav a.nav-link {
+    display: inline-flex; align-items: center; color: var(--accent); border: 1px solid var(--border);
+    border-radius: 6px; padding: 0.35rem 0.6rem; font-size: 0.8rem; text-decoration: none;
+  }
 
   main { flex: 1; padding: 1rem; max-width: 640px; width: 100%; margin: 0 auto; }
   section[hidden] { display: none !important; }
@@ -148,6 +152,7 @@
     <button data-view="run">Run</button>
     <button data-view="search">Search</button>
     <button data-view="settings">Settings</button>
+    <a class="nav-link" href="/sets.html">Set Builder →</a>
   </nav>
 </header>
 
@@ -310,9 +315,15 @@
 
 </main>
 
+<script src="/capture.js"></script>
 <script>
 (function () {
   'use strict';
+
+  // Camera stack (crop geometry, frame-diff trigger, adaptive-quality capture, thumbnail
+  // preview) lives in capture.js, shared with the Set Builder page — see the comment at the top
+  // of that file for why it isn't duplicated.
+  const { api, getCrop, renderCropGuide, ThumbPreview, CaptureRig } = window.CardSorterCapture;
 
   // ── tiny router ──────────────────────────────────────────────
   const views = ['setup', 'calibrate', 'run', 'search', 'settings', 'summary'];
@@ -336,73 +347,18 @@
 
   // ── shared state ─────────────────────────────────────────────
   let appSettings = null;
-  let currentCrop = null; // { left, top, width, height } fractions of the video frame — see getCrop()
   let session = null; // { id, gameId, gameName, setIds, variant, condition, thresholdCents, location, ... }
   let counts = { total: 0, keeper: 0, bulk: 0 };
   let currentBoxLabel = '—';
+  let rig = null; // CaptureRig — owns the crop, the frame-diff loop and the capture encoding
 
   const $ = (id) => document.getElementById(id);
 
   /** Every place appSettings changes (initial load, Calibrate save, raw Settings save) must
-   *  recompute currentCrop through here, so the Run guide and capture crop never drift from
-   *  what was actually saved. */
+   *  push through here, so the Run guide and capture crop never drift from what was saved. */
   function applySettings(s) {
     appSettings = s;
-    currentCrop = getCrop(appSettings);
-  }
-
-  // ═══════════════════════ CROP GEOMETRY ═══════════════════════════════
-
-  // Base crop, as fractions of the frame — the exact box validated in the 2026-08-04
-  // calibration run (scripts/calibrate.ts): full frame scored 0/3 correct against real
-  // TCGTracking /scan calls, this crop scored 2/3 with a clean score/gap separation from wrong
-  // matches. captureCropZoomPct=100 reproduces it exactly; sliders scale/reposition from here.
-  const BASE_CROP_W = 0.58;
-  const BASE_CROP_H = 0.47;
-  const clamp = (n, lo, hi) => Math.min(hi, Math.max(lo, n));
-
-  /** Maps the two persisted slider values to an absolute crop rectangle. Box is always
-   *  horizontally centered (matches every sample photo — the rig points straight down at a
-   *  centered card holder); only size (zoom) and vertical position are adjustable. */
-  function getCrop(settings) {
-    const scale = settings.captureCropZoomPct / 100;
-    const width = clamp(BASE_CROP_W * scale, 0.15, 0.95);
-    const height = clamp(BASE_CROP_H * scale, 0.15, 0.95);
-    const top = (settings.captureCropVPosPct / 100) * (1 - height);
-    const left = (1 - width) / 2;
-    return { left, top, width, height };
-  }
-
-  function renderCropGuide(el, crop) {
-    el.style.left = (crop.left * 100) + '%';
-    el.style.top = (crop.top * 100) + '%';
-    el.style.width = (crop.width * 100) + '%';
-    el.style.height = (crop.height * 100) + '%';
-  }
-
-  /** Converts a fractional crop into the video element's native pixel coordinates — needed
-   *  because getUserMedia's actual resolution isn't known until the stream is playing, so the
-   *  crop can't be baked in as pixels ahead of time. */
-  function cropRectPx(videoWidth, videoHeight, crop) {
-    return {
-      sx: Math.round(crop.left * videoWidth),
-      sy: Math.round(crop.top * videoHeight),
-      sw: Math.round(crop.width * videoWidth),
-      sh: Math.round(crop.height * videoHeight),
-    };
-  }
-
-  async function api(path, opts) {
-    const res = await fetch(path, opts);
-    let body = null;
-    try { body = await res.json(); } catch (e) { /* no body */ }
-    if (!res.ok) {
-      const err = new Error((body && body.error) || (res.status + ' ' + res.statusText));
-      err.status = res.status;
-      err.body = body;
-      throw err;
-    }
-    return body;
+    if (rig) rig.updateSettings(s);
   }
 
   // ═══════════════════════ SETUP ═══════════════════════════════
@@ -415,7 +371,10 @@
 
     const games = await api('/api/games');
     const gameSelect = $('game-select');
-    gameSelect.innerHTML = games.map((g) => `<option value="${g.id}" data-name="${g.display_name}">${g.display_name}</option>`).join('');
+    // displayName, not display_name — /api/games returns tcgcsv.ts's Category shape (camelCase).
+    // The snake_case spelling was a TCGTracking-era leftover that rendered every option as
+    // "undefined" and stored the literal string "undefined" as the session's gameName.
+    gameSelect.innerHTML = games.map((g) => `<option value="${g.id}" data-name="${g.displayName}">${g.displayName}</option>`).join('');
     await onGameChange();
   }
 
@@ -552,25 +511,11 @@
 
   // ═══════════════════════ RUN ══════════════════════════════════
 
-  // Client-side capture/decision state machine — see plan "Client state machine":
-  // IDLE -> ARMED -> CHANGING -> STABLE -> SCANNING -> DECIDED -> WAIT_CLEAR -> ARMED, + STALLED.
-  // ARMED/WAIT_CLEAR both watch for frame-diff; the difference is only which transition a
-  // detected change leads to (a new card arriving vs. the just-decided card being routed away).
-  const S = { IDLE: 'idle', ARMED: 'armed', CHANGING: 'changing', SCANNING: 'scanning', WAIT_CLEAR: 'wait_clear', STALLED: 'stalled', DONE: 'done' };
-  let state = S.IDLE;
-  let stream = null;
-  let loopTimer = null;
-  let prevGray = null;      // Uint8ClampedArray from the last diff-canvas sample
-  let stableCount = 0;
-  let lastActivityAt = 0;   // resets the hopper-empty timer whenever something is happening
-  let lastCaptureBlob = null;
-
-  const video = $('camera');
-  const diffCanvas = document.createElement('canvas');
-  diffCanvas.width = 64; diffCanvas.height = 48;
-  const diffCtx = diffCanvas.getContext('2d', { willReadFrequently: true });
-  const captureCanvas = document.createElement('canvas');
-  const captureCtx = captureCanvas.getContext('2d');
+  // The capture state machine lives in capture.js's CaptureRig. This page owns only what
+  // happens to a capture once it exists: POST it to /scan, route on the decision, re-arm.
+  const thumb = new ThumbPreview({
+    container: $('last-card'), img: $('last-card-thumb'), downloadLink: $('last-card-download'),
+  });
 
   function setBanner(cls, text) {
     const b = $('status-banner');
@@ -589,8 +534,22 @@
   };
 
   async function startRun() {
+    rig = new CaptureRig({
+      video: $('camera'),
+      cropGuide: $('run-crop-guide'),
+      settings: appSettings,
+      onHopperEmpty: () => finishRun(true),
+      onCapture: (blob) => {
+        setBanner('scanning', 'SCANNING…');
+        // Show the thumbnail immediately, before the scan even resolves — a stalled or
+        // wrong-card result is exactly when you need to see what was actually sent.
+        thumb.show(blob);
+        submitScan(blob);
+      },
+    });
+
     try {
-      stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' } }, audio: false });
+      await rig.start();
     } catch (err) {
       setBanner('stalled', 'CAMERA ERROR');
       $('stall-banner').hidden = false;
@@ -598,123 +557,9 @@
         'Camera access failed: ' + err.message + '. getUserMedia needs a secure context — open this over HTTPS (Railway deploy) or on localhost.';
       return;
     }
-    video.srcObject = stream;
-    await video.play();
-    renderCropGuide($('run-crop-guide'), currentCrop);
 
-    state = S.ARMED;
-    lastActivityAt = Date.now();
-    prevGray = null;
     setBanner('armed', 'ARMED');
     updateCounters();
-    loopTimer = setInterval(tick, appSettings.captureIntervalMs);
-  }
-
-  function sampleGray() {
-    // Diff only inside the crop — see plan/calibration finding: motion outside the capture
-    // window (bin walls, hands passing by) isn't a card arriving and shouldn't arm a capture.
-    const { sx, sy, sw, sh } = cropRectPx(video.videoWidth, video.videoHeight, currentCrop);
-    diffCtx.drawImage(video, sx, sy, sw, sh, 0, 0, diffCanvas.width, diffCanvas.height);
-    const data = diffCtx.getImageData(0, 0, diffCanvas.width, diffCanvas.height).data;
-    const gray = new Uint8ClampedArray(diffCanvas.width * diffCanvas.height);
-    for (let i = 0, p = 0; i < data.length; i += 4, p++) {
-      gray[p] = (data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114) | 0;
-    }
-    return gray;
-  }
-
-  function meanAbsDiff(a, b) {
-    let sum = 0;
-    for (let i = 0; i < a.length; i++) sum += Math.abs(a[i] - b[i]);
-    return sum / a.length;
-  }
-
-  function tick() {
-    if (state === S.SCANNING || state === S.DONE) return;
-    if (!video.videoWidth) return;
-
-    const gray = sampleGray();
-    const diff = prevGray ? meanAbsDiff(gray, prevGray) : 0;
-    prevGray = gray;
-    const changed = diff > appSettings.frameDiffThreshold;
-
-    if (state === S.ARMED) {
-      if (changed) {
-        state = S.CHANGING;
-        stableCount = 0;
-        lastActivityAt = Date.now();
-      } else if (Date.now() - lastActivityAt > appSettings.hopperEmptyTimeoutMs) {
-        finishRun(true);
-      }
-      return;
-    }
-
-    if (state === S.CHANGING) {
-      lastActivityAt = Date.now();
-      if (changed) { stableCount = 0; return; }
-      stableCount++;
-      if (stableCount >= appSettings.stableFrames) triggerCapture();
-      return;
-    }
-
-    if (state === S.WAIT_CLEAR) {
-      if (changed) { state = S.ARMED; lastActivityAt = Date.now(); }
-      return;
-    }
-  }
-
-  const MAX_UPLOAD_BYTES = 100 * 1024; // TCGTracking's ~100KB decoded image cap, per the plan
-
-  /** Steps JPEG quality down until the blob fits the cap, or gives up at the floor quality.
-   *  Needed specifically BECAUSE we now crop before upload: calibration testing found a tight
-   *  crop of just the card is LARGER at a fixed quality than the full frame (114KB vs 69KB) —
-   *  removing the plain bin background removes the low-entropy content JPEG compresses best,
-   *  leaving dense card art+text. A fixed q0.8 that was safe for full frames isn't safe here. */
-  function canvasToBlobUnderCap(canvas, maxBytes) {
-    const qualities = [0.8, 0.7, 0.6, 0.5, 0.4];
-    return new Promise((resolve) => {
-      let i = 0;
-      const tryNext = () => {
-        canvas.toBlob((blob) => {
-          if (!blob || blob.size <= maxBytes || i === qualities.length - 1) { resolve(blob); return; }
-          i++;
-          tryNext();
-        }, 'image/jpeg', qualities[i]);
-      };
-      tryNext();
-    });
-  }
-
-  async function triggerCapture() {
-    state = S.SCANNING;
-    setBanner('scanning', 'SCANNING…');
-
-    const { sx, sy, sw, sh } = cropRectPx(video.videoWidth, video.videoHeight, currentCrop);
-    const w = Math.min(sw, 640);
-    const h = Math.round(w * (sh / sw));
-    captureCanvas.width = w; captureCanvas.height = h;
-    captureCtx.drawImage(video, sx, sy, sw, sh, 0, 0, w, h);
-    const blob = await canvasToBlobUnderCap(captureCanvas, MAX_UPLOAD_BYTES);
-    lastCaptureBlob = blob;
-    // Show the thumbnail immediately, before the scan even resolves — a stalled or wrong-card
-    // result is exactly when you need to see what was actually sent, not just successful ones.
-    updateCaptureThumb(blob);
-    submitScan(blob);
-  }
-
-  let lastThumbUrl = null;
-
-  /** Renders the exact bytes POSTed to /scan — deliberately NOT a re-draw from the video
-   *  element, which could look fine on screen while the raw captured buffer is rotated or
-   *  mis-cropped (a known getUserMedia + canvas.drawImage orientation gotcha on some mobile
-   *  browsers). Revokes the previous object URL so a long run doesn't leak memory. */
-  function updateCaptureThumb(blob) {
-    if (lastThumbUrl) URL.revokeObjectURL(lastThumbUrl);
-    lastThumbUrl = URL.createObjectURL(blob);
-    $('last-card').hidden = false;
-    $('last-card-thumb').src = lastThumbUrl;
-    $('last-card-download').href = lastThumbUrl;
-    $('last-card-download').download = 'capture-' + Date.now() + '.jpg'; // unique per save, not per card
   }
 
   async function submitScan(blob) {
@@ -725,12 +570,12 @@
       $('stall-banner').hidden = true;
       await ToneEmitter.emit(result.decision);
       recordResult(result);
-      state = S.WAIT_CLEAR;
+      rig.rearm();
       setBanner('armed', 'ARMED');
     } catch (err) {
       // Any scan failure (documented 503 stall, or anything else) pauses rather than guesses —
       // see plan Decision #12. The card is still sitting on the machine holding for a tone.
-      state = S.STALLED;
+      rig.stall();
       setBanner('stalled', 'STALLED');
       $('stall-banner').hidden = false;
       $('stall-banner').querySelector('p').textContent =
@@ -739,10 +584,10 @@
   }
 
   $('retry-scan-btn').addEventListener('click', async () => {
-    if (!lastCaptureBlob) return;
+    if (!rig || !rig.lastBlob) return;
     try { await api('/api/session/' + session.id + '/resume', { method: 'POST' }); } catch (e) { /* best effort */ }
     setBanner('scanning', 'SCANNING…');
-    await submitScan(lastCaptureBlob);
+    await submitScan(rig.lastBlob);
   });
 
   function recordResult(result) {
@@ -754,7 +599,10 @@
     $('last-card').hidden = false;
     $('last-card-name').textContent = card.name || '(unrecognized)';
     const price = card.priceCents != null ? '$' + (card.priceCents / 100).toFixed(2) : 'no price';
-    $('last-card-meta').textContent = `${result.decision.toUpperCase()} · ${result.reason} · score ${card.score ?? '—'} · ${price}`;
+    // score is a cosine similarity in [-1, 1] since the embedding rewrite — 3dp is enough to
+    // judge a match against minScore/minGap without printing 15 digits of float noise.
+    const score = card.score != null ? card.score.toFixed(3) : '—';
+    $('last-card-meta').textContent = `${result.decision.toUpperCase()} · ${result.reason} · score ${score} · ${price}`;
 
     const li = document.createElement('li');
     li.innerHTML = `<span>${card.name || '(unrecognized)'}</span><span class="tag ${result.decision}">${result.decision}</span>`;
@@ -778,10 +626,9 @@
   $('finish-run-btn').addEventListener('click', () => finishRun(false));
 
   async function finishRun(auto) {
-    if (state === S.DONE) return;
-    state = S.DONE;
-    clearInterval(loopTimer);
-    if (stream) stream.getTracks().forEach((t) => t.stop());
+    if (!rig || rig.isDone()) return;
+    rig.markDone();
+    rig.stop();
     if (session) {
       try { await api('/api/session/' + session.id + '/complete', { method: 'POST' }); } catch (e) { /* best effort */ }
     }

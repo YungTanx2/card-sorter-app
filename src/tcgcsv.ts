@@ -95,6 +95,18 @@ export async function fetchVariants(categoryId: number, groupId: number): Promis
   return [...new Set(prices.map((p) => p.subTypeName))];
 }
 
+/** Distinct rarity vocabulary for a set, for Set Builder's "exclude these rarities" picker.
+ *  Mirrors fetchVariants above: read off the data we already fetch, never a per-game hardcoded
+ *  table — Lorcana's vocabulary ("Enchanted", "Legendary") and Pokemon's ("Illustration Rare",
+ *  "Secret Rare") share nothing. Sorted so the picker is stable between loads. */
+export async function fetchRarities(categoryId: number, groupId: number): Promise<string[]> {
+  const products = await fetchProducts(categoryId, groupId);
+  const rarities = products
+    .map((p) => extractField(p.extendedData, 'Rarity'))
+    .filter((r): r is string => !!r);
+  return [...new Set(rarities)].sort();
+}
+
 const upsertCatalog = db.prepare(`
   INSERT INTO tcgcsv_cache (product_id, name, set_id, set_name, number, rarity, image_url, prices_json, fetched_at)
   VALUES (@productId, @name, @setId, @setName, @number, @rarity, @imageUrl, @pricesJson, @fetchedAt)
