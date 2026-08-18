@@ -365,12 +365,14 @@
 </main>
 
 <script src="/capture.js"></script>
+<script src="/audio.js"></script>
 <script>
 (function () {
   'use strict';
 
   // Camera stack is shared with the price-sorter page (index.html) — see capture.js.
   const { api, ThumbPreview, CaptureRig } = window.CardSorterCapture;
+  const audio = window.CardSorterAudio;
 
   const $ = (id) => document.getElementById(id);
   const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -624,17 +626,32 @@
     b.textContent = text;
   }
 
-  /** Phase 1 stub, identical in intent to the price-sorter's: the banner flash IS the signal
-   *  until the X1PRO exists. Phase 2 swaps this for Web Audio tones without touching the state
-   *  machine in capture.js above it. */
+  /**
+   * Same contract and same two sounds as the price-sorter's emitter, mapped onto this mode's
+   * vocabulary: a card that fills a binder slot is the "good pull" here, exactly as a keeper is
+   * there. audio.js names cues after noises rather than decisions precisely so the two pages can
+   * disagree about meaning while sharing one pair of sounds.
+   *
+   * Worth knowing during a DRY RUN: the ka-ching fires on what a live run *would* have counted.
+   * Nothing is committed, but the sound is not lying to you either.
+   */
   const ToneEmitter = {
     async emit(outcome) {
-      setBanner(outcome, outcome === 'needed' ? 'NEEDED' : 'EXTRA');
-      await new Promise((r) => setTimeout(r, 700));
+      const needed = outcome === 'needed';
+      audio.play(needed ? 'kaching' : 'thunk');
+      setBanner(outcome, needed ? 'NEEDED' : 'EXTRA');
+      await new Promise((r) => setTimeout(r, appSettings.toneSettleMs ?? 700));
+    },
+    alert() {
+      audio.play('alert');
     },
   };
 
   $('start-run-btn').addEventListener('click', async () => {
+    // Inside the tap and before the first await — see index.html. A gesture is spent once the
+    // handler yields, and a suspended AudioContext fails silently for the whole run.
+    audio.unlock();
+
     $('run-error').innerHTML = '';
     const dryRun = $('dryrun-select').value !== 'live';
     try {
@@ -695,6 +712,7 @@
       // Same contract as the price-sorter: never guess-route. The machine is still holding
       // this card, waiting on a tone we're deliberately not sending.
       rig.stall();
+      ToneEmitter.alert();
       setBanner('stalled', 'STALLED');
       $('stall-banner').hidden = false;
       $('stall-banner').querySelector('p').textContent =
@@ -911,6 +929,9 @@
   (async function boot() {
     try {
       appSettings = await api('/api/settings');
+      // This page has no settings editor — it reads once at boot. Volume/enabled changes are made
+      // on the price-sorter page's Settings view and picked up here on next load.
+      audio.configure(appSettings);
       await loadGoals();
     } catch (err) {
       $('goal-list').innerHTML = `<li class="error-box">Failed to load: ${esc(err.message)}</li>`;

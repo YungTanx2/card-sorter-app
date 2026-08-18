@@ -281,4 +281,21 @@ export interface AppSettings {
    */
   captureCropZoomPct: number; // 100 = the validated default crop; sliders run roughly 50-150
   captureCropVPosPct: number; // 0 = crop touches top of frame, 100 = touches bottom
+  /**
+   * Audio cues (public/audio.js). Purely client-side like the crop knobs above — the server
+   * stores and returns them, never interprets them.
+   *
+   * These matter beyond operator feedback: the X1PRO routes on an audio cue it has been taught
+   * ("Sound Learn"), so in Phase 2 these same tones become the machine's control signal. The
+   * cues are synthesized rather than sampled specifically so that retuning is a settings edit.
+   */
+  soundEnabled: boolean;
+  soundVolume: number; // 0-1, master gain
+  /**
+   * How long a decision is held — banner shown, cue ringing — before the rig re-arms for the
+   * next card. Was a duplicated hardcoded 700ms in both mode pages; it becomes a real setting
+   * here because Phase 2 makes it the window the X1PRO has to hear a tone and route, which is a
+   * physical property of the machine rather than a UI preference.
+   */
+  toneSettleMs: number;
 }

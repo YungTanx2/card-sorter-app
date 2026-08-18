@@ -238,7 +238,7 @@
     <div class="camera-wrap">
       <video id="camera" playsinline autoplay muted></video>
       <div class="crop-guide" id="run-crop-guide"></div>
-      <div class="phase-badge">Phase 1 — visual only, no tone</div>
+      <div class="phase-badge">Phase 1 — audio cues on, not yet routing the machine</div>
       <div class="status-banner armed" id="status-banner">ARMED</div>
     </div>
 
@@ -311,11 +311,23 @@
       <button class="secondary" id="settings-save-btn">Save</button>
     </div>
     <div id="settings-status" class="hint"></div>
+
+    <details style="margin-top:1.25rem;">
+      <summary>Sound check</summary>
+      <p class="hint">Save first — these play at the currently saved <code>soundVolume</code>. Tune with <code>soundEnabled</code>, <code>soundVolume</code> (0–1) and <code>toneSettleMs</code> above.</p>
+      <div class="row">
+        <button class="secondary" data-cue="kaching">Ka-ching (keeper)</button>
+        <button class="secondary" data-cue="thunk">Thunk (bulk)</button>
+        <button class="secondary" data-cue="alert">Alert (stall)</button>
+      </div>
+      <div id="sound-status" class="hint"></div>
+    </details>
   </section>
 
 </main>
 
 <script src="/capture.js"></script>
+<script src="/audio.js"></script>
 <script>
 (function () {
   'use strict';
@@ -324,6 +336,7 @@
   // preview) lives in capture.js, shared with the Set Builder page — see the comment at the top
   // of that file for why it isn't duplicated.
   const { api, getCrop, renderCropGuide, ThumbPreview, CaptureRig } = window.CardSorterCapture;
+  const audio = window.CardSorterAudio;
 
   // ── tiny router ──────────────────────────────────────────────
   const views = ['setup', 'calibrate', 'run', 'search', 'settings', 'summary'];
@@ -359,6 +372,7 @@
   function applySettings(s) {
     appSettings = s;
     if (rig) rig.updateSettings(s);
+    audio.configure(s);
   }
 
   // ═══════════════════════ SETUP ═══════════════════════════════
@@ -409,6 +423,11 @@
   $('set-select').addEventListener('change', refreshVariants);
 
   $('start-run-btn').addEventListener('click', async () => {
+    // Must happen inside the tap itself, before any await: browsers only let an AudioContext
+    // leave the suspended state from a real user gesture, and once this handler yields the
+    // gesture is spent. Get it wrong and every cue in the run is silent with no error anywhere.
+    audio.unlock();
+
     $('setup-error').innerHTML = '';
     const gameSelect = $('game-select');
     const gameOpt = gameSelect.options[gameSelect.selectedIndex];
@@ -523,13 +542,30 @@
     b.textContent = text;
   }
 
-  /** Phase 1 stub — see plan's "Audio interface (Phase 2 seam)". The visual flash on the
-   *  banner IS the signal for now; Phase 2 swaps this for real Web Audio tones driving the
-   *  X1PRO, without touching anything in the state machine above it. */
+  /**
+   * The decision signal: banner flash + audio cue, two renderings of one event. Fills the seam
+   * the Phase 1 stub reserved, without the state machine in capture.js noticing.
+   *
+   * The cue is fired and NOT awaited, then the settle delay runs exactly as before — so adding
+   * sound left the physical rhythm of a run byte-for-byte unchanged. That's deliberate: the
+   * settle window is what gives the machine time to route a card, and it should be tuned against
+   * the X1PRO, not silently redefined as "however long a bell rings".
+   *
+   * keeper -> kaching, everything else -> thunk. Note this means a low-confidence card thunks
+   * identically to a genuinely cheap one, which is correct — both are physically going to the
+   * same bulk box, and the manifest is where the distinction lives.
+   */
   const ToneEmitter = {
     async emit(decision) {
-      setBanner(decision, decision === 'keeper' ? 'KEEPER' : 'BULK');
-      await new Promise((r) => setTimeout(r, 700));
+      const keeper = decision === 'keeper';
+      audio.play(keeper ? 'kaching' : 'thunk');
+      setBanner(decision, keeper ? 'KEEPER' : 'BULK');
+      await new Promise((r) => setTimeout(r, appSettings.toneSettleMs ?? 700));
+    },
+    /** A stall is the one event that needs a human. Silence here would defeat the point of
+     *  audio: you'd walk away and come back to a machine that stopped ten minutes ago. */
+    alert() {
+      audio.play('alert');
     },
   };
 
@@ -576,6 +612,7 @@
       // Any scan failure (documented 503 stall, or anything else) pauses rather than guesses —
       // see plan Decision #12. The card is still sitting on the machine holding for a tone.
       rig.stall();
+      ToneEmitter.alert();
       setBanner('stalled', 'STALLED');
       $('stall-banner').hidden = false;
       $('stall-banner').querySelector('p').textContent =
@@ -690,6 +727,28 @@
     $('settings-status').textContent = '';
   }
   $('settings-reload-btn').addEventListener('click', loadSettingsView);
+
+  // Sound check. Each click is its own user gesture, so unlock() here too — a run started on a
+  // different page load doesn't leave this page's context resumed.
+  //
+  // unlock() is deliberately NOT awaited. Chrome's AudioContext.resume() returns a promise that
+  // stays pending forever when there's no user activation, so awaiting it hangs the handler and
+  // nothing plays at all — caught by driving this button programmatically, where there is no
+  // activation. Firing unlock and the cue together is correct anyway: the click IS the
+  // activation, and play() schedules onto the context whether or not resume has landed yet.
+  document.querySelectorAll('[data-cue]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      if (!audio.isSupported()) {
+        $('sound-status').textContent = 'This browser has no Web Audio support — runs will be silent.';
+        return;
+      }
+      audio.unlock();
+      const played = audio.play(btn.dataset.cue) > 0;
+      $('sound-status').textContent = played
+        ? 'Played ' + btn.dataset.cue + '.'
+        : 'Nothing played — check soundEnabled above, and that this tab is not muted.';
+    });
+  });
   $('settings-save-btn').addEventListener('click', async () => {
     try {
       const parsed = JSON.parse($('settings-json').value);
