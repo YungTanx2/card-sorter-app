@@ -4,7 +4,8 @@
     "builder": "NIXPACKS"
   },
   "deploy": {
-    "startCommand": "npm start",
+    "//": "node directly, NOT `npm start`. npm does not exit cleanly when its child is stopped — it prints `npm error signal SIGTERM` and exits non-zero, so every ordinary deploy handover was reported as a crashed deployment. Running node as PID 1 lets the SIGTERM handler in server.ts close the DB and exit 0.",
+    "startCommand": "node dist/server.js",
     "restartPolicyType": "ON_FAILURE",
     "restartPolicyMaxRetries": 5
   }

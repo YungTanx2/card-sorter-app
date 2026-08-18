@@ -1,15 +1,23 @@
 import express from 'express';
 import multer from 'multer';
 import path from 'path';
-import { fetchCategories, fetchSets, fetchVariants } from './tcgcsv';
+import { db } from './db';
+import { fetchCategories, fetchSets, fetchVariants, fetchRarities } from './tcgcsv';
 import { getSettings, updateSettings } from './settings';
+import { StallError } from './errors';
 import {
   createSession, getSession, resumeSession, completeSession,
   openBulkBox, getBulkBoxesForSession, getCardsForSession,
-  scanCard, StallError, searchBulkCards,
+  scanCard, searchBulkCards,
 } from './session';
+import {
+  createGoal, getGoal, listGoals, completeGoal, deleteGoal, getGoalProgress, getMissingList, adjustGoal,
+  createGoalSession, getGoalSession, listGoalSessions, resumeGoalSession, completeGoalSession,
+  scanGoalCard, getGoalCardsForSession, getGoalCardThumb, setGoalCardVoid,
+  getReviewStrip, getFilingList,
+} from './goals';
 import { buildKeeperCsv, buildManifestCsv } from './export';
-import { SessionConfig } from './types';
+import { GoalConfig, SessionConfig } from './types';
 
 const app = express();
 const PORT = process.env.PORT ?? 3010;
@@ -207,6 +215,195 @@ app.get('/api/session/:id/manifest.csv', (req, res) => {
   res.send(buildManifestCsv(session));
 });
 
+// ══════════════════════ SET BUILDER MODE ══════════════════════
+// Parallel to the session routes above, sharing only the catalog pickers (/api/games, /api/sets,
+// /api/variants) and the upload middleware. See PRDs/card-sorter-set-builder.md.
+
+/** Rarity vocabulary for a set — feeds the "exclude these rarities" picker at goal setup. */
+app.get('/api/rarities', async (req, res) => {
+  const gameId = Number(req.query.game_id);
+  const setId = Number(req.query.set_id);
+  if (!Number.isFinite(gameId) || !Number.isFinite(setId)) {
+    res.status(400).json({ error: 'Missing/invalid game_id or set_id query parameter.' });
+    return;
+  }
+  try {
+    res.json(await fetchRarities(gameId, setId));
+  } catch (err) {
+    console.error('[rarities]', err);
+    res.status(502).json({ error: 'Failed to determine rarities for that set.' });
+  }
+});
+
+function requireGoal(req: express.Request, res: express.Response) {
+  const goal = getGoal(req.params.id);
+  if (!goal) {
+    res.status(404).json({ error: `Goal ${req.params.id} not found` });
+    return null;
+  }
+  return goal;
+}
+
+function requireGoalSession(req: express.Request, res: express.Response) {
+  const session = getGoalSession(req.params.id);
+  if (!session) {
+    res.status(404).json({ error: `Goal session ${req.params.id} not found` });
+    return null;
+  }
+  return session;
+}
+
+app.get('/api/goals', (_req, res) => {
+  res.json(listGoals());
+});
+
+app.post('/api/goals', async (req, res) => {
+  const body = req.body as Partial<GoalConfig>;
+  if (!body?.gameId || !Array.isArray(body.setIds) || body.setIds.length === 0 || !body.variant) {
+    res.status(400).json({ error: 'gameId, at least one setId, and a variant are required.' });
+    return;
+  }
+  try {
+    // Like POST /api/session, this pre-warms catalog + embeddings for every scoped set before
+    // returning — near-instant on a set either mode has used before, up to ~90s on a new one.
+    const goal = await createGoal({
+      name: body.name?.trim() || 'Untitled goal',
+      gameId: body.gameId,
+      gameName: body.gameName ?? String(body.gameId),
+      setIds: body.setIds,
+      variant: body.variant,
+      targetCopies: body.targetCopies ?? 1,
+      excludedRarities: body.excludedRarities ?? [],
+      binderRows: body.binderRows ?? 3,
+      binderCols: body.binderCols ?? 3,
+    });
+    res.json(goal);
+  } catch (err) {
+    console.error('[goal-create]', err);
+    res.status(500).json({ error: err instanceof Error ? err.message : 'Failed to create goal.' });
+  }
+});
+
+app.get('/api/goals/:id', (req, res) => {
+  const goal = requireGoal(req, res);
+  if (!goal) return;
+  res.json({ goal, sessions: listGoalSessions(goal.id) });
+});
+
+app.get('/api/goals/:id/progress', (req, res) => {
+  if (!requireGoal(req, res)) return;
+  res.json(getGoalProgress(req.params.id));
+});
+
+app.get('/api/goals/:id/missing', (req, res) => {
+  if (!requireGoal(req, res)) return;
+  res.json(getMissingList(req.params.id));
+});
+
+app.post('/api/goals/:id/adjust', (req, res) => {
+  if (!requireGoal(req, res)) return;
+  const productId = Number(req.body?.productId);
+  const delta = Number(req.body?.delta);
+  if (!Number.isFinite(productId) || !Number.isInteger(delta) || delta === 0) {
+    res.status(400).json({ error: 'productId and a non-zero integer delta are required.' });
+    return;
+  }
+  try {
+    res.json({ productId, owned: adjustGoal(req.params.id, productId, delta, req.body?.note) });
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : 'Adjustment failed.' });
+  }
+});
+
+app.post('/api/goals/:id/complete', (req, res) => {
+  if (!requireGoal(req, res)) return;
+  res.json(completeGoal(req.params.id));
+});
+
+app.delete('/api/goals/:id', (req, res) => {
+  if (!requireGoal(req, res)) return;
+  deleteGoal(req.params.id);
+  res.json({ deleted: req.params.id });
+});
+
+/** dryRun defaults to TRUE — committing to goal state is opt-in. See goals.ts. */
+app.post('/api/goals/:id/session', (req, res) => {
+  if (!requireGoal(req, res)) return;
+  res.json(createGoalSession(req.params.id, req.body?.dryRun !== false));
+});
+
+app.get('/api/goal-session/:id', (req, res) => {
+  const session = requireGoalSession(req, res);
+  if (!session) return;
+  res.json({ session, goal: getGoal(session.goalId), cards: getGoalCardsForSession(session.id) });
+});
+
+app.post('/api/goal-session/:id/resume', (req, res) => {
+  if (!requireGoalSession(req, res)) return;
+  res.json(resumeGoalSession(req.params.id));
+});
+
+app.post('/api/goal-session/:id/complete', (req, res) => {
+  if (!requireGoalSession(req, res)) return;
+  res.json(completeGoalSession(req.params.id));
+});
+
+app.post('/api/goal-session/:id/scan', upload.single('image'), async (req, res) => {
+  const session = requireGoalSession(req, res);
+  if (!session) return;
+  if (!req.file) {
+    res.status(400).json({ error: 'No image uploaded (multipart field "image").' });
+    return;
+  }
+  try {
+    res.json(await scanGoalCard(session.id, req.file.buffer));
+  } catch (err) {
+    if (err instanceof StallError) {
+      // Same contract as the price-sorter's /scan: 503 tells the frontend to stop arming and
+      // show a retry banner rather than guess-routing a card the machine is still holding.
+      res.status(503).json({ error: err.message, stalled: true });
+      return;
+    }
+    console.error('[goal-scan]', err);
+    res.status(500).json({ error: 'Scan failed.' });
+  }
+});
+
+app.get('/api/goal-session/:id/filing-list', (req, res) => {
+  if (!requireGoalSession(req, res)) return;
+  res.json(getFilingList(req.params.id));
+});
+
+app.get('/api/goal-session/:id/review', (req, res) => {
+  if (!requireGoalSession(req, res)) return;
+  res.json(getReviewStrip(req.params.id));
+});
+
+app.get('/api/goal-card/:id/thumb', (req, res) => {
+  const thumb = getGoalCardThumb(Number(req.params.id));
+  if (!thumb) {
+    res.status(404).json({ error: 'No thumbnail stored for that card.' });
+    return;
+  }
+  res.setHeader('Content-Type', 'image/jpeg');
+  // Thumbnails are immutable once written — a card row's capture never changes.
+  res.setHeader('Cache-Control', 'private, max-age=31536000, immutable');
+  res.send(thumb);
+});
+
+app.post('/api/goal-card/:id/void', (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id)) {
+    res.status(400).json({ error: 'Invalid card id.' });
+    return;
+  }
+  try {
+    res.json(setGoalCardVoid(id, req.body?.voided !== false));
+  } catch (err) {
+    res.status(404).json({ error: 'Card not found.' });
+  }
+});
+
 // ---- cross-session bulk search ----
 
 app.get('/api/search', (req, res) => {
@@ -228,6 +425,44 @@ app.put('/api/settings', (req, res) => {
   res.json(updateSettings(req.body ?? {}));
 });
 
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
   console.log(`card-sorter-app listening on port ${PORT}`);
 });
+
+/**
+ * Graceful shutdown. Railway sends SIGTERM whenever a container is replaced, which is every
+ * single deploy — without a handler, Node dies by signal and the platform reports an ordinary
+ * handover as a crashed deployment. (Worse before this change: the start command wrapped the
+ * app in `npm start`, and npm turns its child's SIGTERM into `npm error signal SIGTERM` plus a
+ * non-zero exit, so a clean stop was indistinguishable from a real failure — see railway.json.)
+ *
+ * Closing the database is the part that actually matters, not just the exit code: better-sqlite3
+ * runs in WAL mode (db.ts), and an abrupt kill leaves the write-ahead log un-checkpointed.
+ * SQLite recovers on next open, but now that a mounted volume holds Set Builder goal progress —
+ * the first state in this app that can't be refetched from an API — checkpointing on the way out
+ * is worth the few lines.
+ */
+let shuttingDown = false;
+function shutdown(signal: string) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`[shutdown] ${signal} received — closing server and database`);
+  server.close(() => {
+    try {
+      db.close(); // checkpoints the WAL
+    } catch (err) {
+      console.warn('[shutdown] db close failed:', err instanceof Error ? err.message : err);
+    }
+    process.exit(0);
+  });
+  // Don't let an in-flight scan (embedding a capture can take a second or two) hold the
+  // container open past the platform's grace period — exit anyway rather than be SIGKILLed,
+  // which would skip the checkpoint entirely.
+  setTimeout(() => {
+    console.warn('[shutdown] forced exit after grace period');
+    process.exit(0);
+  }, 8000).unref();
+}
+
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));

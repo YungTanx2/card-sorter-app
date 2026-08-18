@@ -147,6 +147,100 @@ export interface BulkBox {
   cardCount: number;
 }
 
+// ══════════════════════════ SET BUILDER MODE ══════════════════════════
+// A different question asked of the same capture: not "is this worth money?" but "does this
+// advance a set I'm building?". Shares the recognition layer (embeddings.ts + tcgcsv.ts) and
+// nothing else — no pricing, no SKUs, no TCGTracking. See PRDs/card-sorter-set-builder.md.
+
+/** Where a scanned card physically goes. Two piles, matching the X1PRO's two bins. */
+export type GoalOutcome = 'needed' | 'extra';
+
+/**
+ * Why a card went where it did. The distinction that matters most is `low-confidence` vs
+ * `slot-filled`: both send the card to the extras pile, but only the latter means we actually
+ * know what it was. A low-confidence card leaves the goal still reporting that slot missing,
+ * which is what makes the failure self-healing — you'll re-run the pile and get another shot.
+ */
+export type GoalReason = 'fills-slot' | 'slot-filled' | 'excluded-rarity' | 'not-a-set-slot' | 'low-confidence';
+
+export type GoalStatus = 'active' | 'complete';
+
+export interface GoalConfig {
+  name: string;
+  gameId: number;
+  gameName: string;
+  /** REQUIRED, >=1 groupId — same reasoning as SessionConfig.setIds: the matcher scores against
+   *  every candidate in scope, so an unscoped goal means matching the whole game's catalog. */
+  setIds: number[];
+  /** TCGCSV subTypeName. A goal is scoped to ONE printing because recognition structurally
+   *  cannot distinguish them (same productId, same reference image) — so a true Pokemon master
+   *  set is 2-3 goals and the operator pre-splits foils by eye. */
+  variant: string;
+  /** 1 = master set, 4 = play set. One flat number for the whole goal. */
+  targetCopies: number;
+  /** Rarities that don't count toward this goal at all — removed from the binder layout, not
+   *  left as permanent holes. Without this, a targetCopies=4 play-set goal would demand four
+   *  Enchanteds forever and route every chase card to the needed pile run after run. */
+  excludedRarities: string[];
+  binderRows: number;
+  binderCols: number;
+}
+
+export interface Goal extends GoalConfig {
+  id: string;
+  status: GoalStatus;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface GoalSession {
+  id: string;
+  goalId: string;
+  /** When true, scans are logged and reviewable but do NOT count toward the goal. The gate that
+   *  lets set mode ship before recognition has been validated on physical cards. */
+  dryRun: boolean;
+  status: SessionStatus;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface GoalCard {
+  id: number;
+  goalSessionId: string;
+  goalId: string;
+  seq: number;
+  productId: number | null;
+  name: string | null;
+  number: string | null;
+  score: number | null;         // cosine similarity in [-1, 1]
+  runnerUpScore: number | null;
+  outcome: GoalOutcome;
+  reason: GoalReason;
+  /** Set by the review strip when a capture turns out not to match the card it filled. Voiding
+   *  is the only way a slot un-fills, and the derived count follows automatically. */
+  voided: boolean;
+  /** Frozen at insert time from the session's dryRun flag — see db.ts. Derived state is only
+   *  safe when its inputs are immutable. */
+  countsTowardGoal: boolean;
+  hasThumb: boolean;
+  scannedAt: number;
+}
+
+/** One binder pocket: a candidate card plus how many copies of it the goal currently has. */
+export interface GoalSlot {
+  productId: number;
+  name: string;
+  number: string | null;
+  rarity: string | null;
+  imageUrl: string | null;
+  setId: number;
+  setName: string;
+  page: number;
+  pocket: number;
+  owned: number;
+  target: number;
+}
+
 export interface CsvColumnMapping {
   header: string;
   /**
@@ -187,4 +281,21 @@ export interface AppSettings {
    */
   captureCropZoomPct: number; // 100 = the validated default crop; sliders run roughly 50-150
   captureCropVPosPct: number; // 0 = crop touches top of frame, 100 = touches bottom
+  /**
+   * Audio cues (public/audio.js). Purely client-side like the crop knobs above — the server
+   * stores and returns them, never interprets them.
+   *
+   * These matter beyond operator feedback: the X1PRO routes on an audio cue it has been taught
+   * ("Sound Learn"), so in Phase 2 these same tones become the machine's control signal. The
+   * cues are synthesized rather than sampled specifically so that retuning is a settings edit.
+   */
+  soundEnabled: boolean;
+  soundVolume: number; // 0-1, master gain
+  /**
+   * How long a decision is held — banner shown, cue ringing — before the rig re-arms for the
+   * next card. Was a duplicated hardcoded 700ms in both mode pages; it becomes a real setting
+   * here because Phase 2 makes it the window the X1PRO has to hear a tone and route, which is a
+   * physical property of the machine rather than a UI preference.
+   */
+  toneSettleMs: number;
 }

@@ -113,4 +113,87 @@ db.exec(`
     json       TEXT NOT NULL,
     updated_at INTEGER NOT NULL
   );
+
+  -- ══════════════════════ SET BUILDER MODE ══════════════════════
+  -- Deliberately SEPARATE tables from sessions/cards above, not extra columns on them. Set mode
+  -- asks a different question of the same capture ("does this advance a set?" vs "is this worth
+  -- money?") and shares only the recognition layer — tcgcsv_cache, embedding_cache, and the
+  -- confidence knobs in app_settings. Keeping the schemas apart means a bug here cannot break
+  -- the price-sorter, and set-mode rows carry no vestigial price/sku/bulk_box columns.
+
+  -- A long-lived set-building target. Scoped to ONE printing (variant) because the recognition
+  -- layer structurally cannot tell Normal from Reverse Holofoil — same product_id, same
+  -- reference image (see tcgcsv.ts). A true Pokemon master set is therefore 2-3 goals.
+  CREATE TABLE IF NOT EXISTS goals (
+    id                     TEXT PRIMARY KEY,
+    name                   TEXT NOT NULL,
+    game_id                INTEGER NOT NULL,
+    game_name              TEXT NOT NULL,
+    set_ids_json           TEXT NOT NULL,
+    variant                TEXT NOT NULL,
+    target_copies          INTEGER NOT NULL,   -- 1 = master set, 4 = play set
+    excluded_rarities_json TEXT NOT NULL DEFAULT '[]',
+    binder_rows            INTEGER NOT NULL DEFAULT 3,
+    binder_cols            INTEGER NOT NULL DEFAULT 3,
+    status                 TEXT NOT NULL,      -- 'active' | 'complete'
+    created_at             INTEGER NOT NULL,
+    updated_at             INTEGER NOT NULL
+  );
+
+  -- One pile fed through the machine against one goal. Many sessions per goal — a set is built
+  -- over weeks, which is exactly why progress cannot live on the session the way keeper/bulk does.
+  CREATE TABLE IF NOT EXISTS goal_sessions (
+    id         TEXT PRIMARY KEY,
+    goal_id    TEXT NOT NULL REFERENCES goals(id),
+    dry_run    INTEGER NOT NULL DEFAULT 1,
+    status     TEXT NOT NULL,                  -- 'active' | 'stalled' | 'complete'
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_goal_sessions_goal ON goal_sessions(goal_id);
+
+  -- The scan log, and the ONLY source of truth for goal progress — there is deliberately no
+  -- owned-count column anywhere. A counter is a cache with no source of truth: a crash, a
+  -- deleted session or a bug in the review path desyncs it silently with no way to rebuild.
+  --
+  -- Two columns are denormalized on purpose:
+  --   goal_id            -- so the derived-count query is a single-table GROUP BY, no join
+  --   counts_toward_goal -- frozen at insert time from the session's dry_run flag, so toggling
+  --                         that flag later cannot retroactively rewrite history. Derived state
+  --                         is only safe when its inputs are immutable.
+  CREATE TABLE IF NOT EXISTS goal_cards (
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    goal_session_id    TEXT NOT NULL REFERENCES goal_sessions(id),
+    goal_id            TEXT NOT NULL REFERENCES goals(id),
+    seq                INTEGER NOT NULL,
+    product_id         INTEGER,
+    name               TEXT,
+    number             TEXT,
+    score              REAL,                   -- cosine similarity in [-1, 1]
+    runner_up_score    REAL,
+    outcome            TEXT NOT NULL,          -- 'needed' | 'extra'
+    reason             TEXT NOT NULL,          -- 'fills-slot' | 'slot-filled' | 'excluded-rarity' | 'low-confidence'
+    voided             INTEGER NOT NULL DEFAULT 0,
+    counts_toward_goal INTEGER NOT NULL DEFAULT 0,
+    thumb_jpeg         BLOB,                   -- accepted cards only — powers the review strip
+    scanned_at         INTEGER NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_goal_cards_goal ON goal_cards(goal_id);
+  CREATE INDEX IF NOT EXISTS idx_goal_cards_session ON goal_cards(goal_session_id);
+  CREATE INDEX IF NOT EXISTS idx_goal_cards_product ON goal_cards(product_id);
+
+  -- Manual corrections that aren't tied to a scan — "I already own this one", "I sold that one".
+  -- An append-only delta log rather than an editable count, for the same reason as above.
+  CREATE TABLE IF NOT EXISTS goal_adjustments (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    goal_id    TEXT NOT NULL REFERENCES goals(id),
+    product_id INTEGER NOT NULL,
+    delta      INTEGER NOT NULL,
+    note       TEXT,
+    created_at INTEGER NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_goal_adjustments_goal ON goal_adjustments(goal_id);
 `);

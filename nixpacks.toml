@@ -5,4 +5,7 @@ nixPkgs = ["nodejs_22"]
 cmds = ["npm run build"]
 
 [start]
-cmd = "npm start"
+# Kept in sync with railway.json's startCommand (which overrides this). node runs as PID 1 so
+# SIGTERM reaches server.ts's shutdown handler; `npm start` swallowed it into a non-zero exit
+# and made every deploy handover look like a crash.
+cmd = "node dist/server.js"

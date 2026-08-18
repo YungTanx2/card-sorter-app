@@ -12,6 +12,9 @@
   "cacheTtlHours": 168,
   "captureCropZoomPct": 100,
   "captureCropVPosPct": 51,
+  "soundEnabled": true,
+  "soundVolume": 0.6,
+  "toneSettleMs": 700,
   "csvColumns": [
     { "header": "TCGplayer Id", "field": "skuId" },
     { "header": "Product Line", "field": "productLine" },
