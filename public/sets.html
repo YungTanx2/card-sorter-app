@@ -115,6 +115,7 @@
   .last-card .download-link { display: inline-block; margin-top: 0.3rem; color: var(--accent); font-size: 0.78rem; text-decoration: none; }
 
   .stall-banner { margin-top: 1rem; padding: 0.9rem; background: #3a1a1a; border: 1px solid var(--red); border-radius: 10px; }
+  .done-banner { padding: 0.9rem; background: #14301f; border: 1px solid var(--green); border-radius: 10px; font-size: 0.9rem; line-height: 1.5; }
   .stall-banner p { font-size: 0.85rem; margin-bottom: 0.6rem; }
   .run-actions { display: flex; gap: 0.6rem; margin-top: 1rem; }
   .run-actions button { flex: 1; }
@@ -324,7 +325,13 @@
     </div>
 
     <div id="run-done" hidden>
-      <h2>Run complete <span id="done-dry-badge" class="dry-badge" hidden>DRY RUN</span></h2>
+      <h2><span id="done-heading">Run complete</span> <span id="done-dry-badge" class="dry-badge" hidden>DRY RUN</span></h2>
+      <div id="done-complete-note" class="done-banner" hidden style="margin-bottom:1rem;">
+        <strong>Every slot is filled.</strong> The run stopped here on purpose. The card that
+        finished the set was routed normally — but <strong>anything still in the hopper is
+        unsorted</strong>, and every one of those cards is now an extra.
+      </div>
+      <p id="done-reason" class="hint"></p>
       <div class="counters">
         <div class="counter"><div class="n" id="done-total">0</div><div class="l">Cards</div></div>
         <div class="counter"><div class="n" id="done-needed">0</div><div class="l">Needed</div></div>
@@ -382,6 +389,10 @@
   let goals = [];
   let currentGoal = null;      // the goal every non-list view is scoped to
   let currentProgress = null;  // last fetched GoalProgress for currentGoal
+  // Filled slots as of the LAST SCAN. Separate from currentProgress because that payload is only
+  // refetched between runs — reading its filledSlots during a run showed the number frozen at
+  // whatever it was when the run started, so the set could close out with no visible change.
+  let liveFilled = null;
   let goalSession = null;
   let rig = null;
   let thumb = null;
@@ -446,6 +457,7 @@
   async function selectGoal(goal) {
     currentGoal = goal;
     currentProgress = await api('/api/goals/' + goal.id + '/progress');
+    liveFilled = currentProgress.filledSlots;
     binderPage = 1;
     showRunSetup();
     showView('run');
@@ -645,6 +657,9 @@
     alert() {
       audio.play('alert');
     },
+    done() {
+      audio.play('done');
+    },
   };
 
   $('start-run-btn').addEventListener('click', async () => {
@@ -682,7 +697,7 @@
       video: $('camera'),
       cropGuide: $('run-crop-guide'),
       settings: appSettings,
-      onHopperEmpty: () => finishRun(true),
+      onHopperEmpty: () => finishRun('hopper-empty'),
       onCapture: (blob) => {
         setBanner('scanning', 'SCANNING…');
         thumb.show(blob);
@@ -710,6 +725,10 @@
       $('stall-banner').hidden = true;
       await ToneEmitter.emit(result.outcome);
       recordResult(result);
+      // The set closed with this card. Emitting its tone above already routed it, so stopping
+      // here strands nothing — but the ORDER matters: stop before the tone and the machine is
+      // left holding a card it was never told where to put.
+      if (result.goalComplete) { await finishRun('complete'); return; }
       rig.rearm();
       setBanner('armed', 'ARMED');
     } catch (err) {
@@ -742,6 +761,7 @@
   function recordResult(result) {
     counts.total++;
     counts[result.outcome]++;
+    if (result.filledSlots != null) liveFilled = result.filledSlots;
     updateCounters();
 
     const card = result.card;
@@ -765,19 +785,34 @@
     $('count-total').textContent = counts.total;
     $('count-needed').textContent = counts.needed;
     $('count-extra').textContent = counts.extra;
-    $('count-filled').textContent = currentProgress ? currentProgress.filledSlots : '—';
+    $('count-filled').textContent = liveFilled != null ? liveFilled : '—';
   }
 
-  $('finish-run-btn').addEventListener('click', () => finishRun(false));
+  $('finish-run-btn').addEventListener('click', () => finishRun('manual'));
 
-  async function finishRun(auto) {
+  /**
+   * @param {'manual'|'hopper-empty'|'complete'} reason why the run ended.
+   *
+   * The reason is shown rather than swallowed because all three look identical from across the
+   * room — the machine simply stops. "Set finished" and "hopper ran dry" call for opposite next
+   * actions, and guessing wrong means either re-feeding a finished pile or walking away from an
+   * unfinished one.
+   */
+  async function finishRun(reason) {
     if (!rig || rig.isDone()) return;
     rig.markDone();
     rig.stop();
     try { await api('/api/goal-session/' + goalSession.id + '/complete', { method: 'POST' }); } catch (e) { /* best effort */ }
 
+    const done = reason === 'complete';
+    if (done) ToneEmitter.done();
+
     $('run-live').hidden = true;
     $('run-done').hidden = false;
+    $('done-heading').textContent = done ? 'Set complete' : 'Run complete';
+    $('done-complete-note').hidden = !done;
+    $('done-reason').textContent =
+      done ? '' : (reason === 'hopper-empty' ? 'Stopped: no cards seen for a while — hopper looks empty.' : '');
     $('done-dry-badge').hidden = !goalSession.dryRun;
     $('done-total').textContent = counts.total;
     $('done-needed').textContent = counts.needed;
@@ -790,6 +825,9 @@
 
   async function refreshGoalProgress() {
     currentProgress = await api('/api/goals/' + currentGoal.id + '/progress');
+    // Resync the live counter too. Voiding a card in the review strip un-fills its slot, so
+    // without this a second run on the same goal would start from a count that's one too high.
+    liveFilled = currentProgress.filledSlots;
   }
 
   $('back-to-goals-btn').addEventListener('click', async () => {
