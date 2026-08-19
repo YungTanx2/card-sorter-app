@@ -395,6 +395,7 @@
   let liveFilled = null;
   let goalSession = null;
   let rig = null;
+  let lastCaptureMeta = null; // { drift, spanMs } from the confirmation gate, for the readout
   let thumb = null;
   let counts = { total: 0, needed: 0, extra: 0 };
   let binderPage = 1;
@@ -698,8 +699,10 @@
       cropGuide: $('run-crop-guide'),
       settings: appSettings,
       onHopperEmpty: () => finishRun('hopper-empty'),
-      onCapture: (blob) => {
+      onStall: (reason) => showStall(reason),
+      onCapture: (blob, meta) => {
         setBanner('scanning', 'SCANNING…');
+        lastCaptureMeta = meta;
         thumb.show(blob);
         submitScan(blob);
       },
@@ -734,17 +737,41 @@
     } catch (err) {
       // Same contract as the price-sorter: never guess-route. The machine is still holding
       // this card, waiting on a tone we're deliberately not sending.
-      rig.stall();
+      rig.stall('scan-failed');   // fires onStall -> showStall, which sets the banner
       ToneEmitter.alert();
-      setBanner('stalled', 'STALLED');
-      $('stall-banner').hidden = false;
       $('stall-banner').querySelector('p').textContent =
         'Scan failed: ' + err.message + ' — the machine should still be holding this card. Fix your connection, then retry.';
     }
   }
 
+  /**
+   * The two stall kinds need different recovery, and getting it wrong is worse than the stall.
+   * 'scan-failed' means we hold a good image the upload choked on, so Retry re-posts it.
+   * 'unsettled' means no image was ever captured — lastBlob still holds the PREVIOUS card, so
+   * re-posting would identify the wrong card and route this one under that identity.
+   */
+  function showStall(reason) {
+    const unsettled = reason === 'unsettled';
+    setBanner('stalled', unsettled ? 'NOT SETTLED' : 'STALLED');
+    $('stall-banner').hidden = false;
+    $('retry-scan-btn').textContent = unsettled ? 'Try again' : 'Retry scan';
+    if (unsettled) {
+      $('stall-banner').querySelector('p').textContent =
+        'The card never came to rest, so nothing was photographed — the machine should still be '
+        + 'holding it. Check that it landed flat and nothing is nudging the rig, then try again.';
+    }
+  }
+
   $('retry-scan-btn').addEventListener('click', async () => {
-    if (!rig || !rig.lastBlob) return;
+    if (!rig) return;
+    // No image was taken, so there is nothing to re-post — go back to watching this card settle.
+    if (rig.stallReason === 'unsettled') {
+      $('stall-banner').hidden = true;
+      setBanner('armed', 'ARMED');
+      rig.resumeCapture();
+      return;
+    }
+    if (!rig.lastBlob) return;
     try { await api('/api/goal-session/' + goalSession.id + '/resume', { method: 'POST' }); } catch (e) { /* best effort */ }
     setBanner('scanning', 'SCANNING…');
     await submitScan(rig.lastBlob);
@@ -768,11 +795,15 @@
     const score = card.score != null ? card.score.toFixed(3) : '—';
     const gap = (card.score != null && card.runnerUpScore != null) ? (card.score - card.runnerUpScore).toFixed(3) : '—';
     const owned = result.owned != null ? ` · ${result.owned}/${result.target}` : '';
+    // drift/span is the evidence the card was at rest when photographed — shown next to score so
+    // confirmMaxDrift can be tuned against this rig's real noise floor during a dry run.
+    const settle = lastCaptureMeta
+      ? ` · drift ${lastCaptureMeta.drift.toFixed(1)}/${lastCaptureMeta.spanMs}ms` : '';
 
     $('last-card').hidden = false;
     $('last-card-name').textContent = card.name || '(unrecognized)';
     $('last-card-meta').textContent =
-      `${result.outcome.toUpperCase()} · ${REASON_TEXT[result.reason] || result.reason} · score ${score} · gap ${gap}${owned}`;
+      `${result.outcome.toUpperCase()} · ${REASON_TEXT[result.reason] || result.reason} · score ${score} · gap ${gap}${owned}${settle}`;
 
     const li = document.createElement('li');
     li.innerHTML =
