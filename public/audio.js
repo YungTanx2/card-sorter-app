@@ -44,14 +44,17 @@ window.CardSorterAudio = (function () {
   let readyPromise = null;
 
   /**
-   * Download starts at script load, NOT at unlock.
+   * Download AND decode both start at script load, NOT at unlock.
    *
-   * Decoding needs an AudioContext, which must wait for a user gesture — but fetching doesn't,
-   * and the network is the slow half. Without this head start the first card of a run gets the
-   * wrong pack: samples were still in flight, play() fell back to synth, and in Phase 2 that
-   * means the machine hears a ka-ching where it expected 2000Hz and mis-routes card #1.
-   * Caught in testing, where the first Sound check click reported "synth" and the second
-   * "machine". See also whenReady(), which closes the remaining decode gap.
+   * Neither step actually needs a gesture — fetching obviously doesn't, and decoding only needs
+   * *some* context, which decodeTarget() supplies offline. Tying either to unlock() cost us the
+   * same bug twice: the tones were still in flight (or still undecoded) when the first cue fired,
+   * play() fell back to synth, and the pack silently disagreed with the setting. In Phase 2 that
+   * means the machine hears a ka-ching where it expected 2000Hz and mis-routes the card.
+   *
+   * The first miss was the first card of a run; the second was every first Sound check click
+   * after a page load, which is what an operator naturally tests. whenReady() is still the
+   * correct thing to await before either — this just makes it resolve almost immediately.
    */
   const sampleBytes = {};
   Object.keys(SAMPLES).forEach(function (cue) {
@@ -113,13 +116,36 @@ window.CardSorterAudio = (function () {
   }
 
   /**
+   * Something that can decode audio, WITHOUT forcing a live AudioContext into existence.
+   *
+   * An OfflineAudioContext can be constructed with no user gesture and carries none of the
+   * autoplay baggage, so the tones can be decoded the instant the page loads rather than waiting
+   * for a tap. The AudioBuffers it produces are usable from any context — if its sample rate
+   * differs from the live context's, playback resamples them, which preserves pitch.
+   *
+   * Returns null rather than falling back to ensureContext(): creating the real context here
+   * would defeat the lazy construction unlock() depends on.
+   */
+  function decodeTarget() {
+    if (ctx) return ctx;
+    const Off = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+    if (!Off) return null;
+    try {
+      return new Off(1, 1, 44100);
+    } catch (err) {
+      return null;
+    }
+  }
+
+  /**
    * Decodes the already-downloaded tones into AudioBuffers. Idempotent, and safe to call from
-   * anywhere — it just needs a context, so in practice the first unlock() drives it.
+   * anywhere. Normally runs at page load via the offline decoder; if this browser has no
+   * OfflineAudioContext it returns null and the next unlock() retries it against the live one.
    */
   function preloadSamples() {
     if (decodeStarted) return readyPromise;
-    const c = ensureContext();
-    if (!c) return Promise.resolve();
+    const c = decodeTarget();
+    if (!c) return null;
     decodeStarted = true;
 
     readyPromise = Promise.all(Object.keys(SAMPLES).map(function (cue) {
@@ -328,6 +354,9 @@ window.CardSorterAudio = (function () {
     if (cue !== 'alert' && config.soundPack === 'machine' && sampleBuffers[cue]) return 'machine';
     return 'synth';
   }
+
+  // Decode now, while the page is still loading and nothing is waiting on it.
+  preloadSamples();
 
   return {
     isSupported: isSupported,

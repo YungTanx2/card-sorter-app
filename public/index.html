@@ -749,13 +749,18 @@
   // activation. Firing unlock and the cue together is correct anyway: the click IS the
   // activation, and play() schedules onto the context whether or not resume has landed yet.
   document.querySelectorAll('[data-cue]').forEach((btn) => {
-    btn.addEventListener('click', () => {
+    btn.addEventListener('click', async () => {
       if (!audio.isSupported()) {
         $('sound-status').textContent = 'This browser has no Web Audio support — runs will be silent.';
         return;
       }
       audio.unlock();
       const cue = btn.dataset.cue;
+      // Awaiting whenReady() is safe in the way awaiting unlock() is NOT: this promise always
+      // settles, where resume() can stay pending forever. Without it, the first click after a
+      // page load played the synth pack and honestly reported "synth" — the tones simply had
+      // not decoded yet. That made the panel look like the setting wasn't taking effect.
+      await audio.whenReady();
       const played = audio.play(cue) > 0;
       // Report the pack actually used, not the one configured: "machine" degrades to synth until
       // the sample files finish decoding, and silently getting the wrong tone is the failure
