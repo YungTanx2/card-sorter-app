@@ -328,6 +328,15 @@
         <button class="secondary" data-cue="alert">Alert (stall)</button>
       </div>
       <div id="sound-status" class="hint"></div>
+      <div class="row" style="margin-top:.75rem;">
+        <button class="secondary" id="sound-diag-btn">Why this pack?</button>
+      </div>
+      <p class="hint">
+        Reports what this specific device can actually do. Worth checking on the phone when it
+        disagrees with the desktop — <code>build</code> tells you whether the phone is even
+        running the current code.
+      </p>
+      <pre id="sound-diag" class="hint" style="white-space:pre-wrap; word-break:break-word; display:none;"></pre>
     </details>
   </section>
 
@@ -769,6 +778,15 @@
         ? 'Played ' + cue + ' (' + audio.packFor(cue) + ' pack).'
         : 'Nothing played — check soundEnabled above, and that this tab is not muted.';
     });
+  });
+  // Deliberately reports rather than repairs: on a device that silently degrades to synth, the
+  // useful thing is knowing WHICH of the several possible causes it is.
+  $('sound-diag-btn').addEventListener('click', async () => {
+    audio.unlock();
+    await audio.whenReady();
+    const el = $('sound-diag');
+    el.style.display = 'block';
+    el.textContent = JSON.stringify(audio.diagnostics(), null, 2);
   });
   $('settings-save-btn').addEventListener('click', async () => {
     try {

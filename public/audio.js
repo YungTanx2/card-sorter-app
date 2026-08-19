@@ -34,12 +34,20 @@ window.CardSorterAudio = (function () {
     reject: '/sounds/x1pro-normal.m4a',     // 1000Hz, OLED "NORMAL"
   };
 
+  /**
+   * Bump on any change to how the tones load. Surfaced by diagnostics() so a device reporting
+   * the wrong pack can be told apart from a device running stale cached JS — the two look
+   * identical from the outside, and chasing the wrong one costs a deploy cycle each time.
+   */
+  const BUILD = '2026-08-18-offline-decode';
+
   let ctx = null;
   let master = null;
   let noiseBuffer = null;
   let unavailable = false;
   const config = Object.assign({}, DEFAULTS);
   const sampleBuffers = {};   // cue -> decoded AudioBuffer
+  const status = {};          // cue -> why it is or isn't usable, for diagnostics()
   let decodeStarted = false;
   let readyPromise = null;
 
@@ -58,13 +66,21 @@ window.CardSorterAudio = (function () {
    */
   const sampleBytes = {};
   Object.keys(SAMPLES).forEach(function (cue) {
+    status[cue] = { fetch: 'pending', bytes: 0, decode: 'pending', seconds: 0, error: null };
     sampleBytes[cue] = fetch(SAMPLES[cue])
       .then(function (r) {
-        if (!r.ok) throw new Error(r.status + ' ' + r.statusText);
+        if (!r.ok) throw new Error('HTTP ' + r.status + ' ' + r.statusText);
         return r.arrayBuffer();
       })
+      .then(function (ab) {
+        status[cue].fetch = 'ok';
+        status[cue].bytes = ab.byteLength;
+        return ab;
+      })
       .catch(function (err) {
-        console.warn('[audio] could not fetch machine tone "' + cue + '":', err && err.message ? err.message : err);
+        status[cue].fetch = 'failed';
+        status[cue].error = String((err && err.message) || err);
+        console.warn('[audio] could not fetch machine tone "' + cue + '":', status[cue].error);
         return null;
       });
   });
@@ -151,15 +167,31 @@ window.CardSorterAudio = (function () {
     readyPromise = Promise.all(Object.keys(SAMPLES).map(function (cue) {
       return sampleBytes[cue]
         .then(function (ab) {
-          if (!ab) return null;
+          if (!ab) { status[cue].decode = 'skipped (no bytes)'; return null; }
           // decodeAudioData detaches the ArrayBuffer it's given, so hand it a copy — otherwise a
           // second decode attempt (a reconnect, a re-unlock) silently gets an empty buffer.
-          return c.decodeAudioData(ab.slice(0));
+          const p = c.decodeAudioData(ab.slice(0));
+          // Safari before 14.1 only had the callback form, which returns undefined. Calling
+          // .then() on that would throw and look like a decode failure, so name it as its own
+          // outcome — a browser that can't do promise decode needs a different fix than one
+          // that can't do AAC.
+          if (!p || typeof p.then !== 'function') {
+            status[cue].decode = 'failed (callback-only decodeAudioData)';
+            return null;
+          }
+          return p;
         })
-        .then(function (buf) { if (buf) sampleBuffers[cue] = buf; })
+        .then(function (buf) {
+          if (!buf) return;
+          sampleBuffers[cue] = buf;
+          status[cue].decode = 'ok';
+          status[cue].seconds = Math.round(buf.duration * 1000) / 1000;
+        })
         .catch(function (err) {
+          status[cue].decode = 'failed';
+          status[cue].error = String((err && err.message) || err);
           console.warn('[audio] machine tone "' + cue + '" unusable, falling back to synth:',
-            err && err.message ? err.message : err);
+            status[cue].error);
         });
     }));
     return readyPromise;
@@ -306,6 +338,37 @@ window.CardSorterAudio = (function () {
     },
   };
 
+  /**
+   * The measured frequencies of the two vendor tones, so they can be REGENERATED if the sample
+   * files can't be used on some device.
+   *
+   * This matters more than it looks. Falling back from the machine pack to the ka-ching is the
+   * worst available failure: in Phase 2 the tone is the machine's control signal, so a device
+   * that can't decode AAC would route every card wrongly while sounding perfectly pleasant. A
+   * synthesized 2000Hz sine is not a decoration of the real tone — for a threshold detector it
+   * IS the real tone, since the vendor's own files are pure sines with <4% of peak anywhere else.
+   * So the fallback preserves the function and drops only the exact timbre.
+   */
+  const MACHINE_HZ = { accept: 2000, reject: 1000 };
+  const MACHINE_SECONDS = 0.6;
+
+  /** A flat-topped tone, unlike voice()'s percussive decay — the vendor tones hold steady for
+   *  their whole length, and a detector integrating over a window wants that sustain. */
+  function steadyTone(c, hz, at, seconds, gain) {
+    const osc = c.createOscillator();
+    const g = c.createGain();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(hz, at);
+    g.gain.setValueAtTime(0.0001, at);
+    g.gain.exponentialRampToValueAtTime(gain, at + 0.005);
+    g.gain.setValueAtTime(gain, at + seconds - 0.02);
+    g.gain.exponentialRampToValueAtTime(0.0001, at + seconds);
+    osc.connect(g).connect(master);
+    osc.start(at);
+    osc.stop(at + seconds + 0.02);
+    return seconds;
+  }
+
   /** Plays a decoded machine tone through the same master gain as the synth pack, so one volume
    *  setting governs both. */
   function playSample(c, buf, t) {
@@ -336,8 +399,11 @@ window.CardSorterAudio = (function () {
     const t = c.currentTime + 0.01;
 
     try {
-      if (config.soundPack === 'machine' && sampleBuffers[cue]) {
-        return playSample(c, sampleBuffers[cue], t);
+      if (config.soundPack === 'machine') {
+        if (sampleBuffers[cue]) return playSample(c, sampleBuffers[cue], t);
+        // Sample unusable on this device — regenerate the frequency rather than dropping to a
+        // sound the machine was never taught. See MACHINE_HZ.
+        if (MACHINE_HZ[cue]) return steadyTone(c, MACHINE_HZ[cue], t, MACHINE_SECONDS, 0.5);
       }
       const fn = SYNTH[cue];
       if (!fn) { console.warn('[audio] unknown cue:', cue); return 0; }
@@ -351,8 +417,41 @@ window.CardSorterAudio = (function () {
   /** Which pack a given cue would actually use right now — the Sound check panel reports this,
    *  since "machine" silently degrades to synth until the samples finish decoding. */
   function packFor(cue) {
-    if (cue !== 'alert' && config.soundPack === 'machine' && sampleBuffers[cue]) return 'machine';
+    if (config.soundPack === 'machine' && cue !== 'alert') {
+      if (sampleBuffers[cue]) return 'machine';
+      // Right frequency, wrong timbre — correct for the machine, audibly a plain beep. Named
+      // distinctly so "the sample didn't load" never hides behind a green-looking report.
+      if (MACHINE_HZ[cue]) return 'machine-synthesized (' + MACHINE_HZ[cue] + 'Hz)';
+    }
     return 'synth';
+  }
+
+  /**
+   * Everything needed to explain why a given device is on a given pack, in one object.
+   *
+   * Exists because "the phone plays synth, the laptop plays machine" has several causes that are
+   * indistinguishable from the outside — stale cached JS, a browser with no OfflineAudioContext,
+   * a browser that can't decode AAC, or a fetch that 404'd — and each wants a different fix.
+   * `build` settles the stale-cache question on its own.
+   */
+  function diagnostics() {
+    const Off = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+    const cues = {};
+    Object.keys(status).forEach(function (cue) {
+      cues[cue] = Object.assign({ playsAs: packFor(cue) }, status[cue]);
+    });
+    return {
+      build: BUILD,
+      soundPack: config.soundPack,
+      soundEnabled: config.soundEnabled,
+      offlineAudioContext: !!Off,
+      liveAudioContext: !!AudioCtor(),
+      decodeStarted: decodeStarted,
+      contextState: ctx ? ctx.state : 'not created',
+      contextSampleRate: ctx ? ctx.sampleRate : null,
+      cues: cues,
+      userAgent: navigator.userAgent,
+    };
   }
 
   // Decode now, while the page is still loading and nothing is waiting on it.
@@ -360,6 +459,7 @@ window.CardSorterAudio = (function () {
 
   return {
     isSupported: isSupported,
+    diagnostics: diagnostics,
     unlock: unlock,
     configure: configure,
     whenReady: whenReady,
