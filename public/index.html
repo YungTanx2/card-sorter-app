@@ -381,6 +381,7 @@
   let counts = { total: 0, keeper: 0, bulk: 0 };
   let currentBoxLabel = '—';
   let rig = null; // CaptureRig — owns the crop, the frame-diff loop and the capture encoding
+  let lastCaptureMeta = null; // { drift, spanMs } from the confirmation gate, for the readout
 
   const $ = (id) => document.getElementById(id);
 
@@ -597,8 +598,10 @@
       cropGuide: $('run-crop-guide'),
       settings: appSettings,
       onHopperEmpty: () => finishRun(true),
-      onCapture: (blob) => {
+      onStall: (reason) => showStall(reason),
+      onCapture: (blob, meta) => {
         setBanner('scanning', 'SCANNING…');
+        lastCaptureMeta = meta;
         // Show the thumbnail immediately, before the scan even resolves — a stalled or
         // wrong-card result is exactly when you need to see what was actually sent.
         thumb.show(blob);
@@ -633,17 +636,41 @@
     } catch (err) {
       // Any scan failure (documented 503 stall, or anything else) pauses rather than guesses —
       // see plan Decision #12. The card is still sitting on the machine holding for a tone.
-      rig.stall();
+      rig.stall('scan-failed');   // fires onStall -> showStall, which sets the banner
       ToneEmitter.alert();
-      setBanner('stalled', 'STALLED');
-      $('stall-banner').hidden = false;
       $('stall-banner').querySelector('p').textContent =
         'Scan failed: ' + err.message + ' — the machine should still be holding this card. Fix your connection, then retry.';
     }
   }
 
+  /**
+   * The two stall kinds need different recovery, and getting it wrong is worse than the stall.
+   * 'scan-failed' means we hold a good image the upload choked on, so Retry re-posts it.
+   * 'unsettled' means no image was ever captured — lastBlob still holds the PREVIOUS card, so
+   * re-posting would identify the wrong card and route this one under that identity.
+   */
+  function showStall(reason) {
+    const unsettled = reason === 'unsettled';
+    setBanner('stalled', unsettled ? 'NOT SETTLED' : 'STALLED');
+    $('stall-banner').hidden = false;
+    $('retry-scan-btn').textContent = unsettled ? 'Try again' : 'Retry scan';
+    if (unsettled) {
+      $('stall-banner').querySelector('p').textContent =
+        'The card never came to rest, so nothing was photographed — the machine should still be '
+        + 'holding it. Check that it landed flat and nothing is nudging the rig, then try again.';
+    }
+  }
+
   $('retry-scan-btn').addEventListener('click', async () => {
-    if (!rig || !rig.lastBlob) return;
+    if (!rig) return;
+    // No image was taken, so there is nothing to re-post — go back to watching this card settle.
+    if (rig.stallReason === 'unsettled') {
+      $('stall-banner').hidden = true;
+      setBanner('armed', 'ARMED');
+      rig.resumeCapture();
+      return;
+    }
+    if (!rig.lastBlob) return;
     try { await api('/api/session/' + session.id + '/resume', { method: 'POST' }); } catch (e) { /* best effort */ }
     setBanner('scanning', 'SCANNING…');
     await submitScan(rig.lastBlob);
@@ -661,7 +688,11 @@
     // score is a cosine similarity in [-1, 1] since the embedding rewrite — 3dp is enough to
     // judge a match against minScore/minGap without printing 15 digits of float noise.
     const score = card.score != null ? card.score.toFixed(3) : '—';
-    $('last-card-meta').textContent = `${result.decision.toUpperCase()} · ${result.reason} · score ${score} · ${price}`;
+    // drift/span is the evidence the card was at rest when photographed — shown next to score so
+    // confirmMaxDrift can be tuned against this rig's real noise floor during a dry run.
+    const settle = lastCaptureMeta
+      ? ` · drift ${lastCaptureMeta.drift.toFixed(1)}/${lastCaptureMeta.spanMs}ms` : '';
+    $('last-card-meta').textContent = `${result.decision.toUpperCase()} · ${result.reason} · score ${score} · ${price}${settle}`;
 
     const li = document.createElement('li');
     li.innerHTML = `<span>${card.name || '(unrecognized)'}</span><span class="tag ${result.decision}">${result.decision}</span>`;

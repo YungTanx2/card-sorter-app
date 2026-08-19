@@ -145,9 +145,12 @@ window.CardSorterCapture = (function () {
      * @param {HTMLVideoElement} opts.video       live camera element
      * @param {HTMLElement}     [opts.cropGuide]  overlay box redrawn whenever settings change
      * @param {object}           opts.settings    AppSettings (crop + timing knobs)
-     * @param {function}         opts.onCapture   (blob) => void — called the instant a capture
-     *                                            is encoded, BEFORE any upload. Do the upload here.
+     * @param {function}         opts.onCapture   (blob, meta) => void — called the instant a
+     *                                            capture is encoded, BEFORE any upload. Do the
+     *                                            upload here. meta = { drift, spanMs }, the
+     *                                            evidence the card was at rest (see _tick).
      * @param {function}        [opts.onHopperEmpty] () => void — no activity for hopperEmptyTimeoutMs
+     * @param {function}        [opts.onStall]    (reason) => void — 'scan-failed' | 'unsettled'
      * @param {function}        [opts.onStateChange] (state) => void
      * @param {number}          [opts.maxUploadBytes]
      */
@@ -156,6 +159,7 @@ window.CardSorterCapture = (function () {
       this.cropGuide = opts.cropGuide || null;
       this.onCapture = opts.onCapture;
       this.onHopperEmpty = opts.onHopperEmpty || (() => {});
+      this.onStall = opts.onStall || (() => {});
       this.onStateChange = opts.onStateChange || (() => {});
       this.maxUploadBytes = opts.maxUploadBytes ?? MAX_UPLOAD_BYTES;
 
@@ -166,6 +170,12 @@ window.CardSorterCapture = (function () {
       this.stableCount = 0;
       this.lastActivityAt = 0; // resets the hopper-empty timer whenever something is happening
       this.lastBlob = null;
+      this.stallReason = null; // 'scan-failed' | 'unsettled' — decides how a retry recovers
+      // The confirmation anchor: the frame the quiet window STARTED on. Confirming against this
+      // rather than against the previous tick is the whole point — see _tick().
+      this.anchorGray = null;
+      this.anchorAt = 0;
+      this.confirmAttempts = 0;
 
       this.diffCanvas = document.createElement('canvas');
       this.diffCanvas.width = 64;
@@ -212,13 +222,59 @@ window.CardSorterCapture = (function () {
       if (this.stream) { this.stream.getTracks().forEach((t) => t.stop()); this.stream = null; }
     }
 
-    /** Call after a scan resolves successfully — waits for the decided card to physically clear
-     *  the frame before arming for the next one. */
-    rearm() { this._setState(S.WAIT_CLEAR); }
+    /**
+     * Call after a scan resolves successfully — waits for the decided card to physically clear
+     * the frame before arming for the next one.
+     *
+     * prevGray MUST be dropped here. _tick() returns early for SCANNING before sampling, so
+     * prevGray is frozen for the whole scan + tone + settle; comparing against it would produce
+     * a large diff from staleness alone and WAIT_CLEAR would pass on its first tick every time,
+     * whether or not the card actually left. That made WAIT_CLEAR a no-op, which is half the
+     * reason ejection motion was being read as an arriving card.
+     */
+    rearm() {
+      this.prevGray = null;
+      this.stallReason = null;
+      this._resetStable();
+      this.confirmAttempts = 0;
+      this._setState(S.WAIT_CLEAR);
+    }
 
-    /** Call when a scan fails. Deliberately does NOT re-arm: the card is still sitting on the
-     *  machine holding for a tone that was never sent, so nothing is lost by pausing. */
-    stall() { this._setState(S.STALLED); }
+    /**
+     * Call when a capture can't be trusted. Deliberately does NOT re-arm: the card is still
+     * sitting on the machine holding for a tone that was never sent, so nothing is lost by
+     * pausing.
+     *
+     * @param {'scan-failed'|'unsettled'} reason  'scan-failed' means we have a good image the
+     *   upload failed on, so retrying means re-posting lastBlob. 'unsettled' means we never got
+     *   an image at all — so lastBlob still holds the PREVIOUS card, and re-posting it would
+     *   identify the wrong card and route this one under that identity. Clearing it makes the
+     *   callers' existing `if (!rig.lastBlob) return` guard fail safe if that branch is ever hit.
+     */
+    stall(reason) {
+      this.stallReason = reason || 'scan-failed';
+      if (this.stallReason === 'unsettled') this.lastBlob = null;
+      this._setState(S.STALLED);
+      this.onStall(this.stallReason);
+    }
+
+    /** Recovery from an 'unsettled' stall: go back to watching THIS card settle, rather than
+     *  re-posting an image we never took. Returns to CHANGING rather than ARMED because the card
+     *  is already in frame — ARMED waits for a change that may never come, and would sit there
+     *  until the hopper-empty timeout. */
+    resumeCapture() {
+      this.stallReason = null;
+      this.prevGray = null;
+      this._resetStable();
+      this.confirmAttempts = 0;
+      this._setState(S.CHANGING);
+    }
+
+    _resetStable() {
+      this.stableCount = 0;
+      this.anchorGray = null;
+      this.anchorAt = 0;
+    }
 
     markDone() { this._setState(S.DONE); }
 
@@ -259,9 +315,41 @@ window.CardSorterCapture = (function () {
 
       if (this.state === S.CHANGING) {
         this.lastActivityAt = Date.now();
-        if (changed) { this.stableCount = 0; return; }
+        if (changed) { this._resetStable(); return; }
+
+        // The quiet window starts here. Everything below confirms against THIS frame rather than
+        // against the previous tick, and that difference is the whole fix: the per-tick test only
+        // asks "did it move in the last 200ms", so a card creeping into position can sit under
+        // frameDiffThreshold on every single tick while travelling a long way across the window.
+        // Consecutive-frame differencing is blind to slow drift by construction, which is exactly
+        // how a scan was firing while the next card was still being placed.
+        if (this.stableCount === 0) { this.anchorGray = gray; this.anchorAt = Date.now(); }
         this.stableCount++;
-        if (this.stableCount >= this.settings.stableFrames) this._triggerCapture();
+        if (this.stableCount < this.settings.stableFrames) return;
+
+        // Hold until the anchor is far enough back to be worth comparing against. A baseline of
+        // one or two ticks would just be stableFrames by another name.
+        const spanMs = Date.now() - this.anchorAt;
+        if (spanMs < this.settings.confirmMinSpanMs) return;
+
+        const drift = meanAbsDiff(gray, this.anchorGray);
+        if (drift <= this.settings.confirmMaxDrift) {
+          this.confirmAttempts = 0;
+          this._triggerCapture({ drift, spanMs });
+          return;
+        }
+
+        // Still creeping. Re-anchor and look again rather than capturing a card in motion.
+        this.confirmAttempts++;
+        console.log('[capture] not settled: drift ' + drift.toFixed(2) + ' > ' +
+          this.settings.confirmMaxDrift + ' over ' + spanMs + 'ms (attempt ' +
+          this.confirmAttempts + '/' + this.settings.confirmMaxAttempts + ')');
+        if (this.confirmAttempts >= this.settings.confirmMaxAttempts) {
+          // Never guess-route: the machine is holding a card we cannot photograph at rest.
+          this.stall('unsettled');
+          return;
+        }
+        this._resetStable();
         return;
       }
 
@@ -271,7 +359,7 @@ window.CardSorterCapture = (function () {
       }
     }
 
-    async _triggerCapture() {
+    async _triggerCapture(meta) {
       this._setState(S.SCANNING);
 
       const { sx, sy, sw, sh } = cropRectPx(this.video.videoWidth, this.video.videoHeight, this.crop);
@@ -282,7 +370,7 @@ window.CardSorterCapture = (function () {
       this.captureCtx.drawImage(this.video, sx, sy, sw, sh, 0, 0, w, h);
       const blob = await canvasToBlobUnderCap(this.captureCanvas, this.maxUploadBytes);
       this.lastBlob = blob;
-      this.onCapture(blob);
+      this.onCapture(blob, meta || null);
     }
   }
 

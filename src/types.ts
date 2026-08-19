@@ -266,6 +266,19 @@ export interface AppSettings {
   captureIntervalMs: number;
   stableFrames: number;
   frameDiffThreshold: number;
+  /**
+   * Confirmation gate (public/capture.js). Once stableFrames quiet ticks have passed, the frame
+   * is compared against an ANCHOR taken at the start of that quiet window rather than against
+   * the previous tick, and the capture only happens if they still match.
+   *
+   * The long baseline is the point. frameDiffThreshold only asks "did it move in the last
+   * captureIntervalMs", so a card creeping into position stays under it on every tick while
+   * travelling a long way overall — which is how scans were firing mid-placement. Comparing
+   * across the whole window is the only way to see that drift.
+   */
+  confirmMinSpanMs: number;   // minimum anchor age before confirming; below this we wait
+  confirmMaxDrift: number;    // mean abs gray diff vs anchor still considered "at rest"
+  confirmMaxAttempts: number; // failed confirmations before stalling as 'unsettled'
   hopperEmptyTimeoutMs: number;
   scanMaxRetries: number;
   scanRetryBackoffMs: number;
