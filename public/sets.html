@@ -638,7 +638,7 @@
   const ToneEmitter = {
     async emit(outcome) {
       const needed = outcome === 'needed';
-      audio.play(needed ? 'kaching' : 'thunk');
+      audio.play(needed ? 'accept' : 'reject');
       setBanner(outcome, needed ? 'NEEDED' : 'EXTRA');
       await new Promise((r) => setTimeout(r, appSettings.toneSettleMs ?? 700));
     },
@@ -672,6 +672,10 @@
       ? 'DRY RUN — nothing is counted toward the goal'
       : 'LIVE — scans commit to goal progress';
     updateCounters();
+
+    // Same reason as the price sorter: decode the machine tones before arming so the first card
+    // of a run isn't the one that gets a fallback tone.
+    await audio.whenReady();
 
     thumb = new ThumbPreview({ container: $('last-card'), img: $('last-card-thumb'), downloadLink: $('last-card-download') });
     rig = new CaptureRig({

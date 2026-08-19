@@ -14,6 +14,7 @@
   "captureCropVPosPct": 51,
   "soundEnabled": true,
   "soundVolume": 0.6,
+  "soundPack": "machine",
   "toneSettleMs": 700,
   "csvColumns": [
     { "header": "TCGplayer Id", "field": "skuId" },

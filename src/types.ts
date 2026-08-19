@@ -292,6 +292,20 @@ export interface AppSettings {
   soundEnabled: boolean;
   soundVolume: number; // 0-1, master gain
   /**
+   * Which sound pack the decision cues use.
+   *
+   * `machine` plays the X1PRO's own tones, taken from the vendor's operating-instructions page
+   * where they're published for teaching the machine ("Sound Learn") and stored in
+   * `public/sounds/`. Measured: HIGH VALUE is a pure 2000Hz sine, NORMAL a pure 1000Hz sine,
+   * both ~0.6s, everything else under 4% of peak — one octave apart with no harmonic clutter,
+   * which is what makes them easy for a cheap mic and a threshold detector to tell apart.
+   *
+   * `synth` plays the ka-ching/thunk generated in audio.js. Pleasanter over a 250-card pile, but
+   * NOT what the machine was taught — a decorative sound layered onto a control tone is how you
+   * make a naive detector misfire. Use it only while no machine is listening.
+   */
+  soundPack: 'machine' | 'synth';
+  /**
    * How long a decision is held — banner shown, cue ringing — before the rig re-arms for the
    * next card. Was a duplicated hardcoded 700ms in both mode pages; it becomes a real setting
    * here because Phase 2 makes it the window the X1PRO has to hear a tone and route, which is a
