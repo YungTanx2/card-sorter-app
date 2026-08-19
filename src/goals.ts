@@ -340,6 +340,14 @@ export interface ScanGoalCardResult {
    *  the whole progress payload on every capture. */
   owned: number | null;
   target: number;
+  /** Set-level progress AFTER this card was recorded. Carried on every scan for two reasons: the
+   *  run's Filled counter can move in real time, and the frontend can stop the moment the last
+   *  slot fills without a second round trip to find out. */
+  filledSlots: number;
+  totalSlots: number;
+  /** Every slot at or above target. Never true in a dry run — dry scans record
+   *  counts_toward_goal = 0, so they cannot move progress and cannot end a run. */
+  goalComplete: boolean;
 }
 
 /**
@@ -388,9 +396,19 @@ export async function scanGoalCard(goalSessionId: string, imageBuffer: Buffer): 
       scannedAt,
     });
     const card = getGoalCard(info.lastInsertRowid as number);
+    // Read progress AFTER the insert, so "complete" means including this card. Recomputing the
+    // whole thing per scan rather than tracking a counter is the same trade db.ts already makes:
+    // it's a couple of aggregates over a few thousand rows, next to nothing beside recognition,
+    // and it cannot drift out of sync with the rows that define it.
+    const progress = getGoalProgress(goal.id);
     return {
       outcome, reason, card, target: goal.targetCopies,
       owned: candidate ? (getOwnedCounts(goal.id).get(candidate.productId) ?? 0) : null,
+      filledSlots: progress.filledSlots,
+      totalSlots: progress.totalSlots,
+      // A goal with no slots at all (an empty or unsynced set) is NOT complete — otherwise the
+      // first scan against a misconfigured goal would instantly end the run.
+      goalComplete: progress.totalSlots > 0 && progress.filledSlots >= progress.totalSlots,
     };
   };
 

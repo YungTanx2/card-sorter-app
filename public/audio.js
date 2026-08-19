@@ -17,7 +17,7 @@
  * control tone is exactly the kind of thing that makes a naive detector misfire. Default to the
  * machine's own tones; switch to "synth" only while no machine is listening.
  *
- * Cue names are SEMANTIC (accept / reject / alert) rather than descriptive, because one
+ * Cue names are SEMANTIC (accept / reject / alert / done) rather than descriptive, because one
  * semantic now maps to two different noises depending on the pack. Each page keeps its own
  * vocabulary on top: the price sorter routes keeper/bulk, Set Builder routes needed/extra.
  *
@@ -336,6 +336,22 @@ window.CardSorterAudio = (function () {
       }
       return 0.60;
     },
+
+    /** DONE — the set closed and the run stopped itself. A rising G4-C5-E5 arpeggio with a bell
+     *  on the last note, so it reads as an ending rather than another card going by.
+     *
+     *  Every partial sits below 660Hz, deliberately clear of the 1000/2000Hz the machine listens
+     *  for. This cue plays into the same room as the X1PRO's microphone, and a sound straying
+     *  into either detection band would route a card nobody scanned. That rules out bell() here
+     *  despite it being the nicer timbre: its 2.76x partial on an E5 lands at 1819Hz, close
+     *  enough to the 2000Hz accept tone to be a real risk. Plain sines only. Like `alert` it is
+     *  always synthesized — the vendor has no "finished" tone. */
+    done: function (c, t) {
+      voice(c, { type: 'sine', freq: 392.00, gain: 0.30, at: t,        decay: 0.22 }); // G4
+      voice(c, { type: 'sine', freq: 523.25, gain: 0.32, at: t + 0.11, decay: 0.24 }); // C5
+      voice(c, { type: 'sine', freq: 659.25, gain: 0.36, at: t + 0.22, decay: 0.75 }); // E5, rings
+      return 1.00;
+    },
   };
 
   /**
@@ -465,7 +481,7 @@ window.CardSorterAudio = (function () {
     whenReady: whenReady,
     play: play,
     packFor: packFor,
-    CUE_NAMES: ['accept', 'reject', 'alert'],
+    CUE_NAMES: ['accept', 'reject', 'alert', 'done'],
     DEFAULTS: DEFAULTS,
   };
 })();
