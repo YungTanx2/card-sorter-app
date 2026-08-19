@@ -314,10 +314,17 @@
 
     <details style="margin-top:1.25rem;">
       <summary>Sound check</summary>
-      <p class="hint">Save first — these play at the currently saved <code>soundVolume</code>. Tune with <code>soundEnabled</code>, <code>soundVolume</code> (0–1) and <code>toneSettleMs</code> above.</p>
+      <p class="hint">
+        Save first — these play at the currently saved <code>soundVolume</code>.
+        <code>soundPack</code> picks which sounds the machine hears:
+        <strong>machine</strong> plays the X1PRO's own tones (HIGH VALUE = pure 2000&nbsp;Hz,
+        NORMAL = pure 1000&nbsp;Hz, ~0.6&nbsp;s each — one octave apart, which is what makes them
+        easy for the machine to tell apart), <strong>synth</strong> plays the ka-ching/thunk.
+        Keep <code>machine</code> once the X1PRO is listening.
+      </p>
       <div class="row">
-        <button class="secondary" data-cue="kaching">Ka-ching (keeper)</button>
-        <button class="secondary" data-cue="thunk">Thunk (bulk)</button>
+        <button class="secondary" data-cue="accept">Accept (keeper / needed)</button>
+        <button class="secondary" data-cue="reject">Reject (bulk / extra)</button>
         <button class="secondary" data-cue="alert">Alert (stall)</button>
       </div>
       <div id="sound-status" class="hint"></div>
@@ -558,7 +565,7 @@
   const ToneEmitter = {
     async emit(decision) {
       const keeper = decision === 'keeper';
-      audio.play(keeper ? 'kaching' : 'thunk');
+      audio.play(keeper ? 'accept' : 'reject');
       setBanner(decision, keeper ? 'KEEPER' : 'BULK');
       await new Promise((r) => setTimeout(r, appSettings.toneSettleMs ?? 700));
     },
@@ -570,6 +577,11 @@
   };
 
   async function startRun() {
+    // Wait for the machine tones to finish decoding before arming, so card #1 gets the same
+    // tone as every other card. Safe to await (it never depends on resume()), and free in
+    // practice — session creation has already spent seconds pre-warming the set.
+    await audio.whenReady();
+
     rig = new CaptureRig({
       video: $('camera'),
       cropGuide: $('run-crop-guide'),
@@ -743,9 +755,13 @@
         return;
       }
       audio.unlock();
-      const played = audio.play(btn.dataset.cue) > 0;
+      const cue = btn.dataset.cue;
+      const played = audio.play(cue) > 0;
+      // Report the pack actually used, not the one configured: "machine" degrades to synth until
+      // the sample files finish decoding, and silently getting the wrong tone is the failure
+      // that would matter once the X1PRO is listening.
       $('sound-status').textContent = played
-        ? 'Played ' + btn.dataset.cue + '.'
+        ? 'Played ' + cue + ' (' + audio.packFor(cue) + ' pack).'
         : 'Nothing played — check soundEnabled above, and that this tab is not muted.';
     });
   });
