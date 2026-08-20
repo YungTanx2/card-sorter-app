@@ -530,14 +530,12 @@
       captureCropVPosPct: Number($('crop-vpos-slider').value),
     });
     if (!f) { $('calib-framing').textContent = 'Start the camera to measure.'; return; }
-    $('calib-framing').textContent =
-      'stream        ' + f.stream + '  (aspect ' + f.streamAspect + ')
-' +
-      'capture window ' + f.cropPx + '  (aspect ' + f.cropAspect + (f.cropAspect < 1 ? ' — PORTRAIT' : '') + ')
-' +
-      'shortest edge ' + f.shortestEdge + 'px  vs model input ' + f.clipInput + 'px
-' +
-      'ratio         ' + f.ratio + 'x  ' + (f.starved ? '<- STARVED, want >= 1.5x' : 'ok');
+    $('calib-framing').textContent = [
+      'stream         ' + f.stream + '  (aspect ' + f.streamAspect + ')',
+      'capture window ' + f.cropPx + '  (aspect ' + f.cropAspect + (f.cropAspect < 1 ? ' - PORTRAIT' : '') + ')',
+      'shortest edge  ' + f.shortestEdge + 'px  vs model input ' + f.clipInput + 'px',
+      'ratio          ' + f.ratio + 'x  ' + (f.starved ? '<- STARVED, want >= 1.5x' : 'ok'),
+    ].join(String.fromCharCode(10));
   }
 
   function stopCalibCamera() {
