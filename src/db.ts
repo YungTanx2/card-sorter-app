@@ -184,6 +184,35 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_goal_cards_session ON goal_cards(goal_session_id);
   CREATE INDEX IF NOT EXISTS idx_goal_cards_product ON goal_cards(product_id);
 
+  -- Full UNCROPPED frames kept alongside a scan, so crop geometry can be re-tested offline.
+  --
+  -- Separate table rather than another BLOB column on goal_cards for two reasons: these are an
+  -- order of magnitude larger than thumb_jpeg, and they are calibration data with a different
+  -- lifetime from the run itself — deleting them must never touch a card's identity or the goal
+  -- progress derived from it.
+  --
+  -- NOTE: this database does not enable PRAGMA foreign_keys, so the REFERENCES clause below is
+  -- documentation, not enforcement — no cascade will fire. deleteGoal() in goals.ts clears these
+  -- explicitly, matching how every other child table there is already handled. Since these rows
+  -- are by far the largest in the schema, orphaning them would leak the most space of anything.
+  --
+  -- Written for EVERY outcome, not just accepted cards. The low-confidence extras are the most
+  -- informative failures and currently leave no trace at all, which is exactly why we can't
+  -- answer "would a different crop have recognised that one".
+  CREATE TABLE IF NOT EXISTS capture_samples (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    goal_card_id  INTEGER NOT NULL REFERENCES goal_cards(id),
+    frame_jpeg    BLOB NOT NULL,
+    frame_w       INTEGER NOT NULL,
+    frame_h       INTEGER NOT NULL,
+    -- The crop fractions in force when this frame was taken, so an export can reproduce exactly
+    -- what production would have sent and use it as the A/B's baseline arm.
+    crop_json     TEXT NOT NULL,
+    created_at    INTEGER NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_capture_samples_card ON capture_samples(goal_card_id);
+
   -- Manual corrections that aren't tied to a scan — "I already own this one", "I sold that one".
   -- An append-only delta log rather than an editable count, for the same reason as above.
   CREATE TABLE IF NOT EXISTS goal_adjustments (

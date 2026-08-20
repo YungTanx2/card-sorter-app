@@ -231,6 +231,16 @@
       <button class="primary" id="calib-save-btn" style="margin-top:0;">Save crop</button>
     </div>
     <div id="calib-status" class="hint"></div>
+
+    <h2 style="margin-top:1.5rem;">Pixels reaching recognition</h2>
+    <p class="hint">
+      The model resizes whatever it gets so its <strong>shortest edge</strong> is 224px, then
+      keeps only the centre 224&times;224 square. So the shortest edge of the capture window is
+      what actually sets recognition detail — and anything outside that centre square is discarded
+      before the model sees it. Ratios under about 1.5&times; mean marginally-sampled pixels that
+      no threshold tuning can recover.
+    </p>
+    <pre id="calib-framing" class="hint" style="white-space:pre-wrap; word-break:break-word;">Start the camera to measure.</pre>
   </section>
 
   <!-- ══════════════════════ RUN ══════════════════════ -->
@@ -352,7 +362,7 @@
   // Camera stack (crop geometry, frame-diff trigger, adaptive-quality capture, thumbnail
   // preview) lives in capture.js, shared with the Set Builder page — see the comment at the top
   // of that file for why it isn't duplicated.
-  const { api, getCrop, renderCropGuide, ThumbPreview, CaptureRig } = window.CardSorterCapture;
+  const { api, getCrop, renderCropGuide, ThumbPreview, CaptureRig, describeFraming, VIDEO_CONSTRAINTS } = window.CardSorterCapture;
   const audio = window.CardSorterAudio;
 
   // ── tiny router ──────────────────────────────────────────────
@@ -501,13 +511,33 @@
   async function startCalibCamera() {
     $('calib-status').textContent = '';
     try {
-      calibStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' } }, audio: false });
+      calibStream = await navigator.mediaDevices.getUserMedia({ video: VIDEO_CONSTRAINTS, audio: false });
     } catch (err) {
       $('calib-status').textContent = 'Camera access failed: ' + err.message + '. Needs a secure context (HTTPS or localhost).';
       return;
     }
     $('calib-camera').srcObject = calibStream;
     await $('calib-camera').play();
+    renderFraming();
+  }
+
+  /** Reports what the device ACTUALLY granted, rather than what was requested — a constraint the
+   *  browser quietly refused looks identical to one that worked. */
+  function renderFraming() {
+    const v = $('calib-camera');
+    const f = describeFraming(v.videoWidth, v.videoHeight, {
+      captureCropZoomPct: Number($('crop-size-slider').value),
+      captureCropVPosPct: Number($('crop-vpos-slider').value),
+    });
+    if (!f) { $('calib-framing').textContent = 'Start the camera to measure.'; return; }
+    $('calib-framing').textContent =
+      'stream        ' + f.stream + '  (aspect ' + f.streamAspect + ')
+' +
+      'capture window ' + f.cropPx + '  (aspect ' + f.cropAspect + (f.cropAspect < 1 ? ' — PORTRAIT' : '') + ')
+' +
+      'shortest edge ' + f.shortestEdge + 'px  vs model input ' + f.clipInput + 'px
+' +
+      'ratio         ' + f.ratio + 'x  ' + (f.starved ? '<- STARVED, want >= 1.5x' : 'ok');
   }
 
   function stopCalibCamera() {
@@ -522,8 +552,8 @@
     renderCropGuide($('calib-crop-guide'), getCrop({ captureCropZoomPct: zoom, captureCropVPosPct: vpos }));
   }
 
-  $('crop-size-slider').addEventListener('input', updateCalibPreview);
-  $('crop-vpos-slider').addEventListener('input', updateCalibPreview);
+  $('crop-size-slider').addEventListener('input', () => { updateCalibPreview(); renderFraming(); });
+  $('crop-vpos-slider').addEventListener('input', () => { updateCalibPreview(); renderFraming(); });
   $('calib-stop-btn').addEventListener('click', stopCalibCamera);
 
   $('calib-save-btn').addEventListener('click', async () => {

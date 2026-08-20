@@ -117,6 +117,11 @@ export function completeGoal(id: string): Goal {
  * price-sorter and expensive to rebuild.
  */
 export const deleteGoal = db.transaction((id: string) => {
+  // Before goal_cards, since these hang off card ids. Explicit because foreign_keys is off — see
+  // the capture_samples comment in db.ts; a REFERENCES clause alone would silently orphan the
+  // largest rows in the schema.
+  db.prepare(`DELETE FROM capture_samples WHERE goal_card_id IN
+    (SELECT id FROM goal_cards WHERE goal_id = ?)`).run(id);
   db.prepare('DELETE FROM goal_cards WHERE goal_id = ?').run(id);
   db.prepare('DELETE FROM goal_adjustments WHERE goal_id = ?').run(id);
   db.prepare('DELETE FROM goal_sessions WHERE goal_id = ?').run(id);
@@ -455,6 +460,61 @@ export async function scanGoalCard(goalSessionId: string, imageBuffer: Buffer): 
 export function getGoalCardsForSession(goalSessionId: string): GoalCard[] {
   const rows = db.prepare('SELECT * FROM goal_cards WHERE goal_session_id = ? ORDER BY seq').all(goalSessionId) as GoalCardRow[];
   return rows.map(toGoalCard);
+}
+
+/**
+ * Stores the full uncropped frame a scan came from, for offline crop-geometry A/B.
+ *
+ * Best-effort by design: this is calibration data, and failing to keep a sample must never fail
+ * the scan that produced it — the card is physically routed either way.
+ */
+export function saveCaptureSample(
+  goalCardId: number, frame: Buffer, width: number, height: number, crop: unknown,
+): void {
+  try {
+    db.prepare(`INSERT INTO capture_samples
+      (goal_card_id, frame_jpeg, frame_w, frame_h, crop_json, created_at)
+      VALUES (?, ?, ?, ?, ?, ?)`)
+      .run(goalCardId, frame, width, height, JSON.stringify(crop ?? null), Date.now());
+  } catch (err) {
+    console.warn('[goals] capture sample not stored:', err instanceof Error ? err.message : err);
+  }
+}
+
+export interface CaptureSampleRow {
+  id: number; goalCardId: number; frameW: number; frameH: number; cropJson: string;
+  productId: number | null; name: string | null; number: string | null;
+  outcome: GoalOutcome; reason: GoalReason; score: number | null; voided: boolean;
+}
+
+/**
+ * Stored samples for a run, joined to the card each came from.
+ *
+ * `voided` carries the review strip's verdict: false on an accepted row means the operator
+ * confirmed the match, so productId is ground truth. A voided row is known-wrong but its TRUE
+ * identity is unknown — the review strip records that a match was bad, not what the card was.
+ * Exported anyway, flagged, so an A/B can count how many a geometry rescues even though it
+ * cannot score them.
+ */
+export function getCaptureSamples(goalSessionId: string): CaptureSampleRow[] {
+  return db.prepare(`
+    SELECT s.id, s.goal_card_id, s.frame_w, s.frame_h, s.crop_json,
+           c.product_id, c.name, c.number, c.outcome, c.reason, c.score, c.voided
+      FROM capture_samples s
+      JOIN goal_cards c ON c.id = s.goal_card_id
+     WHERE c.goal_session_id = ?
+     ORDER BY c.seq
+  `).all(goalSessionId).map((r: any) => ({
+    id: r.id, goalCardId: r.goal_card_id, frameW: r.frame_w, frameH: r.frame_h,
+    cropJson: r.crop_json, productId: r.product_id, name: r.name, number: r.number,
+    outcome: r.outcome, reason: r.reason, score: r.score, voided: r.voided === 1,
+  }));
+}
+
+export function getCaptureSampleFrame(id: number): Buffer | null {
+  const row = db.prepare('SELECT frame_jpeg FROM capture_samples WHERE id = ?').get(id) as
+    { frame_jpeg: Buffer } | undefined;
+  return row?.frame_jpeg ?? null;
 }
 
 export function getGoalCardThumb(id: number): Buffer | null {

@@ -54,6 +54,59 @@ window.CardSorterCapture = (function () {
     return { left, top, width, height };
   }
 
+  /**
+   * What CLIP's preprocessor consumes. From the model's own preprocessor_config.json:
+   * `size: {shortest_edge: 224}` then `do_center_crop: true, crop_size: 224x224` — so the image's
+   * SHORTEST edge sets the detail, and everything outside the resulting centre square is thrown
+   * away before the model sees anything. Both facts drive the numbers in describeFraming().
+   */
+  const CLIP_INPUT_PX = 224;
+
+  /**
+   * Camera constraints, shared by every stream this app opens.
+   *
+   * Resolution is requested rather than left to the browser. Unconstrained getUserMedia on mobile
+   * frequently hands back 640x480, which after cropping leaves roughly 226px against CLIP's 224 —
+   * a ~1.01x sampling ratio, meaning sensor noise and demosaic artifacts pass into the model with
+   * no averaging to smooth them. At 1080p the same crop carries about 508px, so the 640px upload
+   * is downsampled FROM real pixels instead of being near-native marginal ones.
+   *
+   * `ideal` and not `exact`: a device that can't do 1080p should degrade, never fail to open.
+   * Nothing downstream changes — _triggerCapture still caps output at 640 — so upload size is
+   * unaffected. This buys sampling quality, not bytes.
+   */
+  const VIDEO_CONSTRAINTS = {
+    facingMode: { ideal: 'environment' },
+    width: { ideal: 1920 },
+    height: { ideal: 1080 },
+  };
+
+  /**
+   * The numbers that decide whether recognition is being starved, for a stream of a given size.
+   *
+   * `ratio` is the headline: the crop's shortest edge divided by CLIP's 224. Below ~1.5 the model
+   * is being fed marginally-sampled pixels no threshold tuning can recover. Reported rather than
+   * assumed because it depends entirely on what the device actually granted.
+   */
+  function describeFraming(videoWidth, videoHeight, settings) {
+    if (!videoWidth || !videoHeight) return null;
+    const crop = getCrop(settings);
+    const { sw, sh } = cropRectPx(videoWidth, videoHeight, crop);
+    const shortest = Math.min(sw, sh);
+    return {
+      stream: videoWidth + 'x' + videoHeight,
+      streamAspect: Math.round((videoWidth / videoHeight) * 100) / 100,
+      cropPx: sw + 'x' + sh,
+      // >1 is landscape in PIXELS. Worth watching: the crop fractions are fixed, so a portrait
+      // video stream flips this, which changes which edge CLIP's centre crop cuts into.
+      cropAspect: Math.round((sw / sh) * 100) / 100,
+      shortestEdge: shortest,
+      clipInput: CLIP_INPUT_PX,
+      ratio: Math.round((shortest / CLIP_INPUT_PX) * 100) / 100,
+      starved: shortest / CLIP_INPUT_PX < 1.5,
+    };
+  }
+
   function renderCropGuide(el, crop) {
     el.style.left = (crop.left * 100) + '%';
     el.style.top = (crop.top * 100) + '%';
@@ -76,6 +129,10 @@ window.CardSorterCapture = (function () {
   // ═══════════════════════ CAPTURE ENCODING ═══════════════════════════
 
   const MAX_UPLOAD_BYTES = 100 * 1024;
+  // Sample frames are stored, not recognised, so they are budgeted against volume space rather
+  // than upload latency. 50 cards at this cap is roughly 20MB.
+  const SAMPLE_MAX_BYTES = 400 * 1024;
+  const SAMPLE_MAX_WIDTH = 1280;
 
   /** Steps JPEG quality down until the blob fits the cap, or gives up at the floor quality.
    *  Needed specifically BECAUSE we now crop before upload: calibration testing found a tight
@@ -147,10 +204,13 @@ window.CardSorterCapture = (function () {
      * @param {object}           opts.settings    AppSettings (crop + timing knobs)
      * @param {function}         opts.onCapture   (blob, meta) => void — called the instant a
      *                                            capture is encoded, BEFORE any upload. Do the
-     *                                            upload here. meta = { drift, spanMs }, the
-     *                                            evidence the card was at rest (see _tick).
+     *                                            upload here. meta = { drift, spanMs } (the
+     *                                            evidence the card was at rest, see _tick) plus
+     *                                            { fullFrame, framing } when collecting samples.
      * @param {function}        [opts.onHopperEmpty] () => void — no activity for hopperEmptyTimeoutMs
      * @param {function}        [opts.onStall]    (reason) => void — 'scan-failed' | 'unsettled'
+     * @param {boolean}         [opts.collectSamples] also encode the full uncropped frame, for
+     *                                            offline crop-geometry A/B. Dry runs only.
      * @param {function}        [opts.onStateChange] (state) => void
      * @param {number}          [opts.maxUploadBytes]
      */
@@ -177,6 +237,13 @@ window.CardSorterCapture = (function () {
       this.anchorAt = 0;
       this.confirmAttempts = 0;
 
+      // Sample collection: when on, every capture also encodes the FULL uncropped frame, which
+      // is the only thing that lets crop geometry be re-tested offline. The cropped upload alone
+      // can never answer "would a different crop have matched", because the pixels are gone.
+      this.collectSamples = !!opts.collectSamples;
+      this.fullCanvas = document.createElement('canvas');
+      this.fullCtx = this.fullCanvas.getContext('2d');
+
       this.diffCanvas = document.createElement('canvas');
       this.diffCanvas.width = 64;
       this.diffCanvas.height = 48;
@@ -201,15 +268,22 @@ window.CardSorterCapture = (function () {
       this.onStateChange(next);
     }
 
+    /** Framing report for THIS rig's live stream — see describeFraming(). */
+    framing() {
+      return describeFraming(this.video.videoWidth, this.video.videoHeight, this.settings);
+    }
+
     /** Opens the camera and arms the loop. Throws on camera failure so the caller can render a
      *  mode-appropriate error — getUserMedia needs a secure context (HTTPS or localhost). */
     async start() {
-      this.stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: { ideal: 'environment' } }, audio: false,
-      });
+      this.stream = await navigator.mediaDevices.getUserMedia({ video: VIDEO_CONSTRAINTS, audio: false });
       this.video.srcObject = this.stream;
       await this.video.play();
       if (this.cropGuide) renderCropGuide(this.cropGuide, this.crop);
+
+      // Log once per run: the device decides what it actually grants, and a request that was
+      // quietly refused looks exactly like one that worked.
+      console.log('[capture] framing', JSON.stringify(this.framing()));
 
       this.lastActivityAt = Date.now();
       this.prevGray = null;
@@ -370,7 +444,39 @@ window.CardSorterCapture = (function () {
       this.captureCtx.drawImage(this.video, sx, sy, sw, sh, 0, 0, w, h);
       const blob = await canvasToBlobUnderCap(this.captureCanvas, this.maxUploadBytes);
       this.lastBlob = blob;
-      this.onCapture(blob, meta || null);
+
+      const info = Object.assign({}, meta);
+      if (this.collectSamples) {
+        // Encoded from the same video frame as the crop above, so the two are genuinely paired —
+        // re-cropping this offline reproduces exactly what a different setting would have sent.
+        const full = await this._encodeFullFrame();
+        if (full) {
+          info.fullFrame = full.blob;
+          info.fullFrameW = full.width;
+          info.fullFrameH = full.height;
+        }
+        info.framing = this.framing();
+        info.crop = this.crop;
+      }
+      this.onCapture(blob, info);
+    }
+
+    /** The whole frame, downscaled only if huge. Capped harder than the scan upload because a
+     *  50-card run stores 50 of these. 1280px keeps the crop region well above CLIP's 224 for
+     *  every geometry the A/B will try, without storing 12MP stills. */
+    async _encodeFullFrame() {
+      const vw = this.video.videoWidth;
+      const vh = this.video.videoHeight;
+      if (!vw || !vh) return null;
+      const w = Math.min(vw, SAMPLE_MAX_WIDTH);
+      const h = Math.round(w * (vh / vw));
+      this.fullCanvas.width = w;
+      this.fullCanvas.height = h;
+      this.fullCtx.drawImage(this.video, 0, 0, vw, vh, 0, 0, w, h);
+      const blob = await canvasToBlobUnderCap(this.fullCanvas, SAMPLE_MAX_BYTES);
+      // Dimensions of the STORED frame, not the stream — the crop fractions are relative, but an
+      // export that re-crops offline needs to know what it is re-cropping.
+      return blob ? { blob, width: w, height: h } : null;
     }
   }
 
@@ -380,5 +486,8 @@ window.CardSorterCapture = (function () {
     return sum / a.length;
   }
 
-  return { api, getCrop, renderCropGuide, cropRectPx, canvasToBlobUnderCap, ThumbPreview, CaptureRig, STATE: S, MAX_UPLOAD_BYTES };
+  return {
+    api, getCrop, renderCropGuide, cropRectPx, canvasToBlobUnderCap, ThumbPreview, CaptureRig,
+    describeFraming, VIDEO_CONSTRAINTS, CLIP_INPUT_PX, STATE: S, MAX_UPLOAD_BYTES,
+  };
 })();
