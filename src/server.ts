@@ -13,6 +13,7 @@ import {
 import {
   createGoal, getGoal, listGoals, completeGoal, deleteGoal, getGoalProgress, getMissingList, adjustGoal,
   createGoalSession, getGoalSession, listGoalSessions, resumeGoalSession, completeGoalSession,
+  saveCaptureSample, getCaptureSamples, getCaptureSampleFrame,
   scanGoalCard, getGoalCardsForSession, getGoalCardThumb, setGoalCardVoid,
   getReviewStrip, getFilingList,
 } from './goals';
@@ -348,15 +349,32 @@ app.post('/api/goal-session/:id/complete', (req, res) => {
   res.json(completeGoalSession(req.params.id));
 });
 
-app.post('/api/goal-session/:id/scan', upload.single('image'), async (req, res) => {
+app.post('/api/goal-session/:id/scan',
+  // 'fullFrame' is the optional uncropped companion to 'image', sent only while sample
+  // collection is on. One request rather than two so the pair can never be associated wrongly.
+  upload.fields([{ name: 'image', maxCount: 1 }, { name: 'fullFrame', maxCount: 1 }]),
+  async (req, res) => {
   const session = requireGoalSession(req, res);
   if (!session) return;
-  if (!req.file) {
+  const files = req.files as Record<string, Express.Multer.File[]> | undefined;
+  const image = files?.image?.[0];
+  const fullFrame = files?.fullFrame?.[0];
+  if (!image) {
     res.status(400).json({ error: 'No image uploaded (multipart field "image").' });
     return;
   }
   try {
-    res.json(await scanGoalCard(session.id, req.file.buffer));
+    const result = await scanGoalCard(session.id, image.buffer);
+    // After the scan, never before: a sample is only meaningful once there's a card row to hang
+    // it on, and a storage failure must not cost us the routing decision.
+    if (fullFrame) {
+      const w = Number(req.body?.frameW) || 0;
+      const h = Number(req.body?.frameH) || 0;
+      let crop: unknown = null;
+      try { crop = req.body?.crop ? JSON.parse(req.body.crop) : null; } catch { /* keep null */ }
+      saveCaptureSample(result.card.id, fullFrame.buffer, w, h, crop);
+    }
+    res.json(result);
   } catch (err) {
     if (err instanceof StallError) {
       // Same contract as the price-sorter's /scan: 503 tells the frontend to stop arming and
@@ -367,6 +385,24 @@ app.post('/api/goal-session/:id/scan', upload.single('image'), async (req, res) 
     console.error('[goal-scan]', err);
     res.status(500).json({ error: 'Scan failed.' });
   }
+});
+
+/** Calibration export: the stored samples for a run, with the review strip's verdict attached.
+ *  Read-only and separate from the run's own endpoints — this is A/B data, not run data. */
+app.get('/api/goal-session/:id/samples', (req, res) => {
+  if (!requireGoalSession(req, res)) return;
+  res.json(getCaptureSamples(req.params.id));
+});
+
+app.get('/api/capture-sample/:id/frame', (req, res) => {
+  const frame = getCaptureSampleFrame(Number(req.params.id));
+  if (!frame) {
+    res.status(404).json({ error: 'No sample frame with that id.' });
+    return;
+  }
+  res.setHeader('Content-Type', 'image/jpeg');
+  res.setHeader('Cache-Control', 'private, max-age=31536000, immutable');
+  res.send(frame);
 });
 
 app.get('/api/goal-session/:id/filing-list', (req, res) => {

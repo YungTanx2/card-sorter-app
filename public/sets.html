@@ -268,6 +268,15 @@
       </select>
       <p class="hint">Recognition has not yet been validated on physical cards under the rig. Dry run gives you the full decision, the review strip and the filing list without letting a bad match touch the goal.</p>
 
+      <label style="display:flex; align-items:center; gap:.5rem; margin-top:.75rem;">
+        <input type="checkbox" id="collect-samples" style="width:auto;">
+        <span>Collect calibration samples</span>
+      </label>
+      <p class="hint">Also stores the <strong>full uncropped frame</strong> behind every scan, so
+        crop geometry can be re-tested offline against real captures — the cropped upload alone
+        can never answer &ldquo;would a different crop have matched?&rdquo;, because those pixels
+        are gone. Roughly 20&nbsp;MB per 50 cards. Dry runs only.</p>
+
       <div id="run-error"></div>
       <button class="primary" id="start-run-btn">Start run</button>
 
@@ -670,6 +679,7 @@
 
     $('run-error').innerHTML = '';
     const dryRun = $('dryrun-select').value !== 'live';
+    const collectSamples = dryRun && $('collect-samples').checked;
     try {
       goalSession = await api('/api/goals/' + currentGoal.id + '/session', {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ dryRun }),
@@ -700,11 +710,12 @@
       settings: appSettings,
       onHopperEmpty: () => finishRun('hopper-empty'),
       onStall: (reason) => showStall(reason),
+      collectSamples,
       onCapture: (blob, meta) => {
         setBanner('scanning', 'SCANNING…');
         lastCaptureMeta = meta;
         thumb.show(blob);
-        submitScan(blob);
+        submitScan(blob, meta);
       },
     });
 
@@ -720,9 +731,16 @@
     setBanner('armed', 'ARMED');
   });
 
-  async function submitScan(blob) {
+  async function submitScan(blob, meta) {
     const form = new FormData();
     form.append('image', blob, 'capture.jpg');
+    // Same request as the scan itself, so a frame can never be filed against the wrong card.
+    if (meta && meta.fullFrame) {
+      form.append('fullFrame', meta.fullFrame, 'frame.jpg');
+      form.append('frameW', String(meta.fullFrameW || 0));
+      form.append('frameH', String(meta.fullFrameH || 0));
+      form.append('crop', JSON.stringify(meta.crop || null));
+    }
     try {
       const result = await api('/api/goal-session/' + goalSession.id + '/scan', { method: 'POST', body: form });
       $('stall-banner').hidden = true;
@@ -774,7 +792,7 @@
     if (!rig.lastBlob) return;
     try { await api('/api/goal-session/' + goalSession.id + '/resume', { method: 'POST' }); } catch (e) { /* best effort */ }
     setBanner('scanning', 'SCANNING…');
-    await submitScan(rig.lastBlob);
+    await submitScan(rig.lastBlob, lastCaptureMeta);
   });
 
   const REASON_TEXT = {
