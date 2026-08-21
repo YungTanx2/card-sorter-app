@@ -13,7 +13,7 @@ import {
 import {
   createGoal, getGoal, listGoals, completeGoal, deleteGoal, getGoalProgress, getMissingList, adjustGoal,
   createGoalSession, getGoalSession, listGoalSessions, resumeGoalSession, completeGoalSession,
-  saveCaptureSample, getCaptureSamples, getCaptureSampleFrame,
+  saveCaptureSample, getCaptureSamples, getCaptureSampleFrame, fetchRaritySlotCounts,
   scanGoalCard, getGoalCardsForSession, getGoalCardThumb, setGoalCardVoid,
   getReviewStrip, getFilingList,
 } from './goals';
@@ -221,6 +221,30 @@ app.get('/api/session/:id/manifest.csv', (req, res) => {
 // /api/variants) and the upload middleware. See PRDs/card-sorter-set-builder.md.
 
 /** Rarity vocabulary for a set — feeds the "exclude these rarities" picker at goal setup. */
+/**
+ * Rarity -> how many binder slots it would contribute, summed across every selected set.
+ *
+ * Distinct from /api/rarities, which returns bare names from the raw product list. This counts
+ * through the same printed-number filter slot assignment uses, so the goal-creation preview can
+ * state the real consequence of a selection — the trap being that "Exclude rarities" reads as
+ * "collect these" and silently builds the exact inverse goal.
+ */
+app.get('/api/rarity-counts', async (req, res) => {
+  const gameId = Number(req.query.game_id);
+  const raw = String(req.query.set_ids ?? req.query.set_id ?? '');
+  const setIds = raw.split(',').map(Number).filter((n) => Number.isFinite(n) && n > 0);
+  if (!Number.isFinite(gameId) || setIds.length === 0) {
+    res.status(400).json({ error: 'Missing/invalid game_id or set_ids query parameter.' });
+    return;
+  }
+  try {
+    res.json(await fetchRaritySlotCounts(gameId, setIds));
+  } catch (err) {
+    console.error('[rarity-counts]', err);
+    res.status(502).json({ error: 'Failed to count rarities for those sets.' });
+  }
+});
+
 app.get('/api/rarities', async (req, res) => {
   const gameId = Number(req.query.game_id);
   const setId = Number(req.query.set_id);

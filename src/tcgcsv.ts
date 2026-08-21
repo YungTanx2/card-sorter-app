@@ -107,6 +107,26 @@ export async function fetchRarities(categoryId: number, groupId: number): Promis
   return [...new Set(rarities)].sort();
 }
 
+/**
+ * A set's cards in CandidateCard shape WITHOUT touching the cache or fetching prices.
+ *
+ * Exists for the goal-creation preview, which has to answer "what would this goal collect?"
+ * before any goal (or prewarm) exists. Deliberately read-only: browsing the rarity picker must
+ * not write catalog rows as a side effect.
+ */
+export async function fetchSetCandidates(categoryId: number, groupId: number): Promise<CandidateCard[]> {
+  const products = await fetchProducts(categoryId, groupId);
+  return products.map((p) => ({
+    productId: p.productId,
+    name: p.name,
+    number: extractField(p.extendedData, 'Number'),
+    rarity: extractField(p.extendedData, 'Rarity'),
+    imageUrl: p.imageUrl ?? null,
+    setId: groupId,
+    setName: '',
+  }));
+}
+
 const upsertCatalog = db.prepare(`
   INSERT INTO tcgcsv_cache (product_id, name, set_id, set_name, number, rarity, image_url, prices_json, fetched_at)
   VALUES (@productId, @name, @setId, @setName, @number, @rarity, @imageUrl, @pricesJson, @fetchedAt)

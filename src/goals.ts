@@ -4,7 +4,7 @@ import { db } from './db';
 import { StallError } from './errors';
 import { matchCard, prewarmEmbeddings } from './embeddings';
 import { getSettings } from './settings';
-import { fetchSets, getCandidatesForSets, prewarmSet } from './tcgcsv';
+import { fetchSets, getCandidatesForSets, prewarmSet, fetchSetCandidates } from './tcgcsv';
 import { assignSlots, parseCardNumber, compareCardNumbers } from './ordering';
 import {
   CandidateCard, Goal, GoalCard, GoalConfig, GoalOutcome, GoalReason, GoalSession, GoalSlot,
@@ -185,6 +185,29 @@ function isSetSlotCandidate(c: CandidateCard): boolean {
 
 /** Every in-scope candidate as a binder pocket, with its owned count. Non-cards and excluded
  *  rarities are removed before indexing — they are not holes, they're not part of this goal. */
+/** Sentinel for cards with no Rarity value at all. They are never excluded (see isExcluded in
+ *  ordering.ts), so they are ALWAYS collected — the preview must say so rather than hide them. */
+export const NO_RARITY_KEY = '(no rarity)';
+
+/**
+ * How many binder slots each rarity would contribute, for sets that may not be prewarmed yet.
+ *
+ * Powers the goal-creation preview. Counted through the SAME filter slot assignment uses
+ * (isSetSlotCandidate — a printed number), so the preview's total is the goal's real slot count
+ * and not an approximation from the raw product list.
+ */
+export async function fetchRaritySlotCounts(gameId: number, setIds: number[]): Promise<Record<string, number>> {
+  const counts: Record<string, number> = {};
+  for (const setId of setIds) {
+    for (const c of await fetchSetCandidates(gameId, setId)) {
+      if (!isSetSlotCandidate(c)) continue;
+      const key = c.rarity && c.rarity.trim() ? c.rarity.trim() : NO_RARITY_KEY;
+      counts[key] = (counts[key] ?? 0) + 1;
+    }
+  }
+  return counts;
+}
+
 export function getGoalSlots(goal: Goal): GoalSlot[] {
   const candidates = getCandidatesForSets(goal.setIds).filter(isSetSlotCandidate);
   const owned = getOwnedCounts(goal.id);

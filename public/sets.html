@@ -114,6 +114,12 @@
   .last-card .meta { color: var(--muted); font-size: 0.78rem; margin-top: 0.15rem; }
   .last-card .download-link { display: inline-block; margin-top: 0.3rem; color: var(--accent); font-size: 0.78rem; text-decoration: none; }
 
+  .rarity-preview { margin: .6rem 0 1rem; padding: .75rem .9rem; border-radius: 10px;
+    border: 1px solid var(--border); background: var(--surface2); font-size: .85rem; line-height: 1.55; }
+  .rarity-preview.ok { border-color: var(--green); background: #14301f; }
+  .rarity-preview.warn { border-color: var(--red); background: #3a1a1a; }
+  .rarity-preview .rp-head { font-weight: 600; }
+  .rarity-preview .rp-skip { color: var(--muted); margin-top: .35rem; }
   .stall-banner { margin-top: 1rem; padding: 0.9rem; background: #3a1a1a; border: 1px solid var(--red); border-radius: 10px; }
   .done-banner { padding: 0.9rem; background: #14301f; border: 1px solid var(--green); border-radius: 10px; font-size: 0.9rem; line-height: 1.5; }
   .stall-banner p { font-size: 0.85rem; margin-bottom: 0.6rem; }
@@ -238,7 +244,10 @@
 
     <label for="rarity-select">Exclude rarities <span id="rarity-count" class="hint" style="display:inline"></span></label>
     <select id="rarity-select" multiple></select>
-    <p class="hint">Excluded rarities leave the binder entirely — no permanent holes. For a play set, exclude the chase rarities you were never going to get four of.</p>
+    <p class="hint">This is a <strong>skip</strong> list, not a collect list &mdash; whatever you
+      select here is thrown out. Check the summary below before creating.</p>
+
+    <div id="rarity-preview" class="rarity-preview">Pick a set to see what this goal will collect.</div>
 
     <div class="row">
       <div>
@@ -405,6 +414,7 @@
   let goalSession = null;
   let rig = null;
   let lastCaptureMeta = null; // { drift, spanMs } from the confirmation gate, for the readout
+  let rarityCounts = null;    // rarity -> slot count for the selected sets, for the create preview
   let thumb = null;
   let counts = { total: 0, needed: 0, extra: 0 };
   let binderPage = 1;
@@ -502,20 +512,73 @@
     if (!sampleSetId) return;
 
     $('rarity-count').textContent = '(loading…)';
+    $('rarity-preview').textContent = 'Loading set contents…';
     try {
       const { variants } = await api(`/api/variants?game_id=${gameId}&set_id=${sampleSetId}`);
       $('variant-select').innerHTML = variants.map((v) => `<option value="${esc(v)}">${esc(v)}</option>`).join('');
-      const rarities = await api(`/api/rarities?game_id=${gameId}&set_id=${sampleSetId}`);
-      $('rarity-select').innerHTML = rarities.map((r) => `<option value="${esc(r)}">${esc(r)}</option>`).join('');
-      $('rarity-count').textContent = `(${rarities.length} in this set)`;
+      // Counts, not just names, and across EVERY selected set rather than a single sample — the
+      // preview has to state the goal's real slot count, so an approximation would defeat it.
+      const setsParam = (selected.length ? selected : [sampleSetId]).join(',');
+      rarityCounts = await api(`/api/rarity-counts?game_id=${gameId}&set_ids=${setsParam}`);
+      const rarities = Object.keys(rarityCounts).sort();
+      $('rarity-select').innerHTML = rarities
+        .map((r) => `<option value="${esc(r)}">${esc(r)} (${rarityCounts[r]})</option>`).join('');
+      $('rarity-count').textContent = `(${rarities.length} in ${selected.length > 1 ? 'these sets' : 'this set'})`;
+      renderRarityPreview();
     } catch (err) {
       $('new-error').innerHTML = `<div class="error-box">Couldn't load set details: ${esc(err.message)}</div>`;
       $('rarity-count').textContent = '';
+      rarityCounts = null;
+      $('rarity-preview').textContent = 'Could not load set contents.';
     }
+  }
+
+  /**
+   * Shows what the current selection will actually build.
+   *
+   * Exists because "Exclude rarities" states the mechanism while the operator is thinking about
+   * the goal — selecting Rare/Super Rare/Legendary to BUILD a rares set silently produces the
+   * exact inverse, and nothing downstream reveals it: the run just marks every card 'extra', and
+   * low-confidence/excluded cards never reach the review strip. Mirrors isExcluded() in
+   * ordering.ts, including that a card with no rarity is never excluded.
+   */
+  function renderRarityPreview() {
+    const el = $('rarity-preview');
+    if (!rarityCounts) { el.className = 'rarity-preview'; el.textContent = 'Pick a set to see what this goal will collect.'; return; }
+    const skip = new Set(Array.from($('rarity-select').selectedOptions).map((o) => o.value.toLowerCase()));
+    const copies = Number($('target-input').value) || 1;
+
+    const collected = [];
+    const skipped = [];
+    let nCollect = 0;
+    let nSkip = 0;
+    for (const r of Object.keys(rarityCounts).sort()) {
+      const n = rarityCounts[r];
+      if (skip.has(r.toLowerCase())) { skipped.push(`${r} ${n}`); nSkip += n; }
+      else { collected.push(`${r} ${n}`); nCollect += n; }
+    }
+
+    const fmt = (parts) => parts.join(' · ');
+    if (nCollect === 0) {
+      el.className = 'rarity-preview warn';
+      el.innerHTML = '<div class="rp-head">This goal would collect nothing.</div>' +
+        '<div class="rp-skip">Every rarity is in the skip list. Select the ones you do NOT want.</div>';
+      return;
+    }
+    el.className = 'rarity-preview ok';
+    el.innerHTML =
+      `<div class="rp-head">Will collect ${nCollect} card${nCollect === 1 ? '' : 's'}` +
+      ` · ${nCollect * copies} copies (${copies} each)</div>` +
+      `<div>${esc(fmt(collected))}</div>` +
+      (skipped.length
+        ? `<div class="rp-skip">Skipping ${nSkip}: ${esc(fmt(skipped))}</div>`
+        : '<div class="rp-skip">Skipping nothing.</div>');
   }
 
   $('game-select').addEventListener('change', onGameChange);
   $('set-select').addEventListener('change', refreshSetVocab);
+  $('rarity-select').addEventListener('change', renderRarityPreview);
+  $('target-input').addEventListener('input', renderRarityPreview);
 
   $('create-goal-btn').addEventListener('click', async () => {
     $('new-error').innerHTML = '';
