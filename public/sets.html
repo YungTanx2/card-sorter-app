@@ -723,9 +723,12 @@
   const ToneEmitter = {
     async emit(outcome) {
       const needed = outcome === 'needed';
-      audio.play(needed ? 'accept' : 'reject');
+      const heldFor = audio.play(needed ? 'accept' : 'reject');
       setBanner(outcome, needed ? 'NEEDED' : 'EXTRA');
-      await new Promise((r) => setTimeout(r, appSettings.toneSettleMs ?? 700));
+      // Never re-arm while the tone is still sounding — tone duration is an operator setting in
+      // the tones pack, so it can exceed toneSettleMs.
+      const settle = appSettings.toneSettleMs ?? 700;
+      await new Promise((r) => setTimeout(r, Math.max(settle, heldFor * 1000 + 150)));
     },
     alert() {
       audio.play('alert');

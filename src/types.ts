@@ -317,7 +317,25 @@ export interface AppSettings {
    * NOT what the machine was taught — a decorative sound layered onto a control tone is how you
    * make a naive detector misfire. Use it only while no machine is listening.
    */
-  soundPack: 'machine' | 'synth';
+  soundPack: 'machine' | 'synth' | 'tones';
+  /**
+   * Frequencies for the 'tones' pack, in Hz. Settings rather than constants because the right
+   * pair is a property of the rig, not of the software — the X1PRO's Sound Learn rejected both
+   * the vendor's own 1000/2000Hz pair and the synth cues as "too close" on this hardware, so
+   * retuning must not require a deploy.
+   *
+   * Two rules when changing them. Keep both in roughly 800-2500Hz, where a phone micro-speaker
+   * is efficient. And keep them NON-HARMONIC: a phone speaker at volume produces several percent
+   * 2nd-harmonic distortion, so a 1000/2000Hz pair means the lower tone physically emits the
+   * upper one. Defaults are DTMF frequencies, a set designed so no frequency is an integer
+   * multiple of another. public/audio.js harmonicRisk() checks a pair and the Sound check panel
+   * shows its verdict.
+   */
+  toneAcceptHz: number;
+  toneRejectHz: number;
+  /** How long each tone holds, in ms. Must be comfortably shorter than toneSettleMs, or the run
+   *  re-arms while the tone is still sounding — the pages guard this, but keep it sane anyway. */
+  toneDurationMs: number;
   /**
    * How long a decision is held — banner shown, cue ringing — before the rig re-arms for the
    * next card. Was a duplicated hardcoded 700ms in both mode pages; it becomes a real setting
