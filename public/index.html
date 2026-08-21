@@ -326,12 +326,24 @@
       <summary>Sound check</summary>
       <p class="hint">
         Save first — these play at the currently saved <code>soundVolume</code>.
-        <code>soundPack</code> picks which sounds the machine hears:
-        <strong>machine</strong> plays the X1PRO's own tones (HIGH VALUE = pure 2000&nbsp;Hz,
-        NORMAL = pure 1000&nbsp;Hz, ~0.6&nbsp;s each — one octave apart, which is what makes them
-        easy for the machine to tell apart), <strong>synth</strong> plays the ka-ching/thunk.
-        Keep <code>machine</code> once the X1PRO is listening.
+        <code>soundPack</code> picks what the machine hears:
       </p>
+      <ul class="hint" style="margin:0 0 .75rem 1.1rem;">
+        <li><strong>tones</strong> — steady sines at <code>toneAcceptHz</code> /
+          <code>toneRejectHz</code>. Use this one. Tunable, and the only pack designed for
+          Sound Learn.</li>
+        <li><strong>machine</strong> — the X1PRO's own files (2000&nbsp;/&nbsp;1000&nbsp;Hz).
+          Exactly an octave apart, so speaker distortion of the lower tone lands on the upper
+          one; this rig's Sound Learn rejected the pair as too close.</li>
+        <li><strong>synth</strong> — ka-ching&nbsp;/&nbsp;thunk. Pleasant, but each cue changes
+          frequency over its life, so Sound Learn measures something different every press.</li>
+      </ul>
+      <p class="hint">
+        Retuning: keep both roughly 800–2500&nbsp;Hz, and keep them
+        <strong>non-harmonic</strong> — the check below flags a pair whose distortion will
+        collide. 941&nbsp;/&nbsp;1477 and 852&nbsp;/&nbsp;1336 are known-safe (DTMF).
+      </p>
+      <pre id="tone-config" class="hint" style="white-space:pre-wrap; word-break:break-word;"></pre>
       <div class="row">
         <button class="secondary" data-cue="accept">Accept (keeper / needed)</button>
         <button class="secondary" data-cue="reject">Reject (bulk / extra)</button>
@@ -401,6 +413,26 @@
     appSettings = s;
     if (rig) rig.updateSettings(s);
     audio.configure(s);
+    renderToneConfig();
+  }
+
+  /** Reports the tone pair actually in effect and whether it is safe from harmonic collision.
+   *  Rendered on every settings change so a retune is checked the moment it is saved, rather
+   *  than at the machine when Sound Learn refuses the pair. */
+  function renderToneConfig() {
+    const el = $('tone-config');
+    if (!el || !audio.toneConfig) return;
+    const t = audio.toneConfig();
+    const lines = [
+      'pack       ' + t.pack,
+      'accept     ' + t.acceptHz + ' Hz',
+      'reject     ' + t.rejectHz + ' Hz',
+      'duration   ' + t.durationMs + ' ms',
+      'ratio      ' + t.ratio,
+      'harmonics  ' + (t.risk ? 'RISK - ' + t.risk : 'safe - no simple integer ratio'),
+    ];
+    el.textContent = lines.join(String.fromCharCode(10));
+    el.style.color = t.risk && t.pack === 'tones' ? 'var(--red)' : '';
   }
 
   // ═══════════════════════ SETUP ═══════════════════════════════
@@ -604,9 +636,13 @@
   const ToneEmitter = {
     async emit(decision) {
       const keeper = decision === 'keeper';
-      audio.play(keeper ? 'accept' : 'reject');
+      const heldFor = audio.play(keeper ? 'accept' : 'reject');
       setBanner(decision, keeper ? 'KEEPER' : 'BULK');
-      await new Promise((r) => setTimeout(r, appSettings.toneSettleMs ?? 700));
+      // Never re-arm while the tone is still sounding. toneSettleMs alone was safe when cue
+      // lengths were fixed, but the tones pack makes duration an operator setting — raise it
+      // past the settle time and the next capture would start mid-tone.
+      const settle = appSettings.toneSettleMs ?? 700;
+      await new Promise((r) => setTimeout(r, Math.max(settle, heldFor * 1000 + 150)));
     },
     /** A stall is the one event that needs a human. Silence here would defeat the point of
      *  audio: you'd walk away and come back to a machine that stopped ten minutes ago. */

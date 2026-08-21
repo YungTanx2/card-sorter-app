@@ -26,7 +26,11 @@
 window.CardSorterAudio = (function () {
   'use strict';
 
-  const DEFAULTS = { soundEnabled: true, soundVolume: 0.6, soundPack: 'machine' };
+  const DEFAULTS = {
+    soundEnabled: true, soundVolume: 0.6, soundPack: 'machine',
+    // Defaults for the "tones" pack — see TONES below for why these two numbers.
+    toneAcceptHz: 1477, toneRejectHz: 941, toneDurationMs: 600,
+  };
 
   // The vendor's tones, extracted and verified byte-for-byte against the source page.
   const SAMPLES = {
@@ -226,7 +230,12 @@ window.CardSorterAudio = (function () {
     if (!settings) return;
     if (typeof settings.soundEnabled === 'boolean') config.soundEnabled = settings.soundEnabled;
     if (Number.isFinite(settings.soundVolume)) config.soundVolume = clamp(settings.soundVolume, 0, 1);
-    if (settings.soundPack === 'machine' || settings.soundPack === 'synth') config.soundPack = settings.soundPack;
+    if (PACKS.indexOf(settings.soundPack) >= 0) config.soundPack = settings.soundPack;
+    // Clamped to a range a phone speaker can actually produce and a small mic can hear: below
+    // ~300Hz a micro-speaker has essentially no output, above ~5kHz you are fighting hiss.
+    if (Number.isFinite(settings.toneAcceptHz)) config.toneAcceptHz = clamp(settings.toneAcceptHz, 300, 5000);
+    if (Number.isFinite(settings.toneRejectHz)) config.toneRejectHz = clamp(settings.toneRejectHz, 300, 5000);
+    if (Number.isFinite(settings.toneDurationMs)) config.toneDurationMs = clamp(settings.toneDurationMs, 120, 3000);
     if (master) master.gain.value = config.soundVolume;
   }
 
@@ -368,16 +377,83 @@ window.CardSorterAudio = (function () {
   const MACHINE_HZ = { accept: 2000, reject: 1000 };
   const MACHINE_SECONDS = 0.6;
 
-  /** A flat-topped tone, unlike voice()'s percussive decay — the vendor tones hold steady for
-   *  their whole length, and a detector integrating over a window wants that sustain. */
-  function steadyTone(c, hz, at, seconds, gain) {
+  /**
+   * ═══ THE "tones" PACK — steady, non-harmonic, operator-tunable ═══
+   *
+   * Built after Sound Learn rejected BOTH other packs as "too close", the vendor's own tones
+   * being the worse of the two. Two things were wrong, and this pack fixes both.
+   *
+   * 1. A cue must measure the same no matter WHEN it is sampled. The synth ka-ching is six
+   *    oscillators starting at two different times and decaying at six different rates, so
+   *    "what frequency is this?" answers ~3000Hz, then 1047Hz, then 1568Hz over its life.
+   *    Sound Learn samples a short window, so repeated presses of one button measured different
+   *    things and classified randomly. A steady sine has no such phase.
+   *
+   * 2. The two cues must not be HARMONICALLY RELATED. The vendor pair is 1000 and 2000Hz —
+   *    exactly an octave, which is the single worst choice available here. A phone speaker at
+   *    volume runs several percent THD dominated by the 2nd harmonic, so playing 1000Hz makes
+   *    the speaker itself emit 2000Hz: the NORMAL tone physically contains the HIGH VALUE tone.
+   *    Octave errors are also the classic failure of autocorrelation pitch detection, and Sound
+   *    Learn must use something general since it learns arbitrary sounds.
+   *
+   * The defaults are DTMF frequencies (941 and 1477Hz), chosen because the DTMF set was designed
+   * so no frequency is an integer multiple of another — precisely to survive harmonic distortion
+   * in cheap hardware. 2 x 941 = 1882Hz, a long way from 1477Hz.
+   *
+   * Frequencies are SETTINGS, not constants: two successive frequency recommendations were
+   * refuted by this rig, so retuning must not require a deploy. harmonicRisk() below guards the
+   * one mistake that is easy to make when retuning.
+   */
+  const TONES = {
+    accept: function (c, t) { return steadyTone(c, config.toneAcceptHz, t, config.toneDurationMs / 1000, 0.5, 0.025); },
+    reject: function (c, t) { return steadyTone(c, config.toneRejectHz, t, config.toneDurationMs / 1000, 0.5, 0.025); },
+  };
+
+  const PACKS = ['machine', 'synth', 'tones'];
+
+  /**
+   * Whether two cue frequencies are close to a simple integer ratio, i.e. whether speaker
+   * distortion of one will land on the other. Returns null when the pair is safe.
+   *
+   * Encoded rather than left to judgement because this is exactly the trap the vendor pair fell
+   * into, and it is invisible until a machine refuses to learn the pair.
+   */
+  function harmonicRisk(a, b) {
+    const lo = Math.min(a, b);
+    const hi = Math.max(a, b);
+    const ratios = [[2, 1], [3, 1], [4, 1], [3, 2], [4, 3], [5, 2], [5, 3], [5, 4]];
+    for (let i = 0; i < ratios.length; i++) {
+      const n = ratios[i][0];
+      const d = ratios[i][1];
+      const target = (lo * n) / d;
+      // 3% window: wide enough to catch a pair that distortion will smear together, narrow
+      // enough not to condemn genuinely unrelated frequencies.
+      if (Math.abs(hi - target) / target < 0.03) {
+        return n + ':' + d + ' — distortion of ' + Math.round(lo) + 'Hz lands on ' + Math.round(hi) + 'Hz';
+      }
+    }
+    return null;
+  }
+
+  /**
+   * A flat-topped tone, unlike voice()'s percussive decay — a detector integrating over a window
+   * wants sustain, and the whole point of the tones pack is that every sampling instant measures
+   * the same thing.
+   *
+   * `ramp` is the fade in/out, and it is not cosmetic. Switching a sine on abruptly is a step
+   * discontinuity, which is broadband in the frequency domain — it sprays energy across the
+   * spectrum including wherever the OTHER cue lives. A 25ms ramp keeps the cue spectrally clean;
+   * 5ms is fine for the vendor-tone fallback, which only needs to be recognisable.
+   */
+  function steadyTone(c, hz, at, seconds, gain, ramp) {
+    const r = Math.min(ramp || 0.005, seconds / 3);
     const osc = c.createOscillator();
     const g = c.createGain();
     osc.type = 'sine';
     osc.frequency.setValueAtTime(hz, at);
     g.gain.setValueAtTime(0.0001, at);
-    g.gain.exponentialRampToValueAtTime(gain, at + 0.005);
-    g.gain.setValueAtTime(gain, at + seconds - 0.02);
+    g.gain.exponentialRampToValueAtTime(gain, at + r);
+    g.gain.setValueAtTime(gain, at + seconds - r);
     g.gain.exponentialRampToValueAtTime(0.0001, at + seconds);
     osc.connect(g).connect(master);
     osc.start(at);
@@ -415,6 +491,7 @@ window.CardSorterAudio = (function () {
     const t = c.currentTime + 0.01;
 
     try {
+      if (config.soundPack === 'tones' && TONES[cue]) return TONES[cue](c, t);
       if (config.soundPack === 'machine') {
         if (sampleBuffers[cue]) return playSample(c, sampleBuffers[cue], t);
         // Sample unusable on this device — regenerate the frequency rather than dropping to a
@@ -433,6 +510,10 @@ window.CardSorterAudio = (function () {
   /** Which pack a given cue would actually use right now — the Sound check panel reports this,
    *  since "machine" silently degrades to synth until the samples finish decoding. */
   function packFor(cue) {
+    if (config.soundPack === 'tones' && TONES[cue]) {
+      const hz = cue === 'accept' ? config.toneAcceptHz : config.toneRejectHz;
+      return 'tones (' + Math.round(hz) + 'Hz)';
+    }
     if (config.soundPack === 'machine' && cue !== 'alert') {
       if (sampleBuffers[cue]) return 'machine';
       // Right frequency, wrong timbre — correct for the machine, audibly a plain beep. Named
@@ -481,6 +562,19 @@ window.CardSorterAudio = (function () {
     whenReady: whenReady,
     play: play,
     packFor: packFor,
+    harmonicRisk: harmonicRisk,
+    toneConfig: function () {
+      return {
+        pack: config.soundPack,
+        acceptHz: config.toneAcceptHz,
+        rejectHz: config.toneRejectHz,
+        durationMs: config.toneDurationMs,
+        ratio: Math.round((Math.max(config.toneAcceptHz, config.toneRejectHz)
+          / Math.min(config.toneAcceptHz, config.toneRejectHz)) * 1000) / 1000,
+        risk: harmonicRisk(config.toneAcceptHz, config.toneRejectHz),
+      };
+    },
+    PACKS: PACKS,
     CUE_NAMES: ['accept', 'reject', 'alert', 'done'],
     DEFAULTS: DEFAULTS,
   };

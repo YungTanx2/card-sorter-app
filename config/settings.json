@@ -17,8 +17,11 @@
   "captureCropVPosPct": 51,
   "soundEnabled": true,
   "soundVolume": 0.6,
-  "soundPack": "machine",
-  "toneSettleMs": 700,
+  "soundPack": "tones",
+  "toneAcceptHz": 1477,
+  "toneRejectHz": 941,
+  "toneDurationMs": 600,
+  "toneSettleMs": 800,
   "csvColumns": [
     { "header": "TCGplayer Id", "field": "skuId" },
     { "header": "Product Line", "field": "productLine" },
