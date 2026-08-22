@@ -132,6 +132,12 @@ export interface CardRecord {
   name: string | null;
   score: number | null;         // cosine similarity in [-1, 1] against the top candidate
   runnerUpScore: number | null; // cosine similarity against the #2 candidate
+  /** WHICH card came second, not just how close it was. A gap below minGap is the single most
+   *  common failure mode, and without the runner-up's identity the manifest cannot distinguish
+   *  "lost to its own separately-listed foil printing" from "lost to a genuinely similar card" —
+   *  the first is a catalog problem, the second a capture problem, and they need opposite fixes. */
+  runnerUpProductId: number | null;
+  runnerUpName: string | null;
   priceCents: number | null;
   decision: Decision;
   reason: DecisionReason;
@@ -214,6 +220,9 @@ export interface GoalCard {
   number: string | null;
   score: number | null;         // cosine similarity in [-1, 1]
   runnerUpScore: number | null;
+  /** See CardRecord.runnerUpProductId — same reasoning, same diagnostic value. */
+  runnerUpProductId: number | null;
+  runnerUpName: string | null;
   outcome: GoalOutcome;
   reason: GoalReason;
   /** Set by the review strip when a capture turns out not to match the card it filled. Voiding

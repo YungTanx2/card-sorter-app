@@ -187,13 +187,65 @@ function rowToCandidate(row: CatalogRow): CandidateCard {
   };
 }
 
-/** Reads back the pre-warmed candidate list for a session's scoped sets — this is what
- *  session.ts's scanCard() matches a capture against, entirely from the local cache. */
-export function getCandidatesForSets(setIds: number[]): CandidateCard[] {
+/**
+ * Is this product actually obtainable in the printing the run is sorting?
+ *
+ * TCGPlayer is inconsistent about where "printing" lives. For most cards it is a SKU-level
+ * attribute — one product carrying both a Normal and a Cold Foil price row. For a minority it
+ * is promoted to a whole separate product, e.g. Attack of the Vine! ships BOTH:
+ *
+ *   [704658] Robin Hood - Created by the Vine          #159  ->  Normal    $0.05
+ *   [704657] Robin Hood - Created by the Vine (Foil)   #159  ->  Cold Foil $0.62
+ *
+ * Two products, one card, reference images 0.9938 cosine apart. Left in the pool they are a
+ * permanently unresolvable pair: no capture can ever separate them by minGap, so every scan of
+ * that card is forced to low-confidence by a distinction the run already ruled out. Measured on
+ * that set, filtering here takes products with a >0.95 twin from 42 to ZERO, under every variant.
+ *
+ * Conservative in one direction on purpose: a product with NO price data at all is KEPT. That is
+ * "we don't know", not "wrong printing", and dropping it would make a freshly-released card
+ * unmatchable rather than merely unpriceable. Only a product that has prices and demonstrably
+ * lacks this one is excluded.
+ */
+function hasPrintingFor(row: CatalogRow, variant: string): boolean {
+  let prices: TCGCSVPrice[];
+  try {
+    prices = (JSON.parse(row.prices_json) as TCGCSVPrice[]) ?? [];
+  } catch {
+    return true; // unparseable price blob — same "don't know" rule as no data at all
+  }
+  if (prices.length === 0) return true;
+  return prices.some((p) => p.subTypeName === variant && p.marketPrice != null && Number.isFinite(p.marketPrice));
+}
+
+/**
+ * Reads back the pre-warmed candidate list for a session's scoped sets — this is what
+ * session.ts's scanCard() matches a capture against, entirely from the local cache.
+ *
+ * `variant` narrows the pool to the printing being sorted. Passing it is strongly preferred:
+ * the run already declared one, and matching against printings it cannot route is pure
+ * ambiguity. It stays optional so offline tooling (scripts/crop-ab.ts) can score against the
+ * unfiltered catalog when that is deliberately the question.
+ */
+export function getCandidatesForSets(setIds: number[], variant?: string): CandidateCard[] {
   if (setIds.length === 0) return [];
   const placeholders = setIds.map(() => '?').join(',');
   const rows = db.prepare(`SELECT * FROM tcgcsv_cache WHERE set_id IN (${placeholders})`).all(...setIds) as CatalogRow[];
-  return rows.map(rowToCandidate);
+  if (!variant) return rows.map(rowToCandidate);
+
+  const scoped = rows.filter((r) => hasPrintingFor(r, variant));
+
+  // Never let the filter empty the pool. A variant string that matches no subTypeName in this set
+  // — a run created against a different game, or TCGCSV renaming a printing — would otherwise
+  // turn every scan into "no candidates" and mark a whole run low-confidence, with the machine
+  // happily sorting the entire pile into bulk and no error anywhere. Degrading to the unfiltered
+  // pool restores the pre-filter behaviour, which is worse but not silently catastrophic.
+  if (scoped.length === 0 && rows.length > 0) {
+    console.warn(`[tcgcsv] variant "${variant}" matched no products in sets ${setIds.join(', ')} — ` +
+      'falling back to the unfiltered candidate pool. Check the run\'s variant against the set\'s printings.');
+    return rows.map(rowToCandidate);
+  }
+  return scoped.map(rowToCandidate);
 }
 
 export function getPricesForProduct(productId: number): TCGCSVPrice[] {

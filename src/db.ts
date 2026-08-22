@@ -94,6 +94,12 @@ db.exec(`
     name             TEXT,
     score            INTEGER,
     runner_up_score  INTEGER,
+    -- The runner-up's IDENTITY, not just its distance. Without this, a low-confidence row says
+    -- "something scored within minGap of the winner" but never what, so the single most common
+    -- cause (two catalog products that are the same card — a foil printing split into its own
+    -- productId) is invisible in the manifest and can only be inferred offline.
+    runner_up_product_id INTEGER,
+    runner_up_name   TEXT,
     price_cents      INTEGER,
     decision         TEXT NOT NULL,
     reason           TEXT NOT NULL,
@@ -172,6 +178,8 @@ db.exec(`
     number             TEXT,
     score              REAL,                   -- cosine similarity in [-1, 1]
     runner_up_score    REAL,
+    runner_up_product_id INTEGER,              -- see the cards table for why identity is kept
+    runner_up_name     TEXT,
     outcome            TEXT NOT NULL,          -- 'needed' | 'extra'
     reason             TEXT NOT NULL,          -- 'fills-slot' | 'slot-filled' | 'excluded-rarity' | 'low-confidence'
     voided             INTEGER NOT NULL DEFAULT 0,
@@ -226,3 +234,27 @@ db.exec(`
 
   CREATE INDEX IF NOT EXISTS idx_goal_adjustments_goal ON goal_adjustments(goal_id);
 `);
+
+/**
+ * Idempotent column adds, for databases that already exist.
+ *
+ * CREATE TABLE IF NOT EXISTS above only shapes a FRESH database — it is a no-op against a
+ * volume that already holds a table, so a column added to the DDL never reaches production.
+ * On Railway the volume outlives every deploy, which means the schema block above describes
+ * what a new install gets and this block is what actually migrates the running one. Any new
+ * column must be added in BOTH places or the two diverge silently.
+ *
+ * SQLite's ALTER TABLE ADD COLUMN is cheap (metadata only, no table rewrite) and existing rows
+ * get NULL, which is the honest value here: those scans genuinely did not record a runner-up.
+ */
+function addColumn(table: string, column: string, decl: string): void {
+  const cols = db.prepare('SELECT name FROM pragma_table_info(?)').all(table) as { name: string }[];
+  if (cols.some((c) => c.name === column)) return;
+  db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${decl}`);
+  console.log(`[db] migrated: added ${table}.${column}`);
+}
+
+addColumn('cards', 'runner_up_product_id', 'INTEGER');
+addColumn('cards', 'runner_up_name', 'TEXT');
+addColumn('goal_cards', 'runner_up_product_id', 'INTEGER');
+addColumn('goal_cards', 'runner_up_name', 'TEXT');

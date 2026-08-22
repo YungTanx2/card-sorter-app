@@ -124,8 +124,8 @@ export function buildKeeperCsv(session: Session): { csv: string; excluded: Exclu
 
 interface ManifestRow {
   seq: number; name: string | null; decision: string; reason: string;
-  score: number | null; runner_up_score: number | null; price_cents: number | null;
-  bulk_box_label: string | null; scanned_at: number;
+  score: number | null; runner_up_score: number | null; runner_up_name: string | null;
+  price_cents: number | null; bulk_box_label: string | null; scanned_at: number;
 }
 
 /**
@@ -135,18 +135,24 @@ interface ManifestRow {
  */
 export function buildManifestCsv(session: Session): string {
   const rows = db.prepare(`
-    SELECT c.seq, c.name, c.decision, c.reason, c.score, c.runner_up_score, c.price_cents,
-           b.label as bulk_box_label, c.scanned_at
+    SELECT c.seq, c.name, c.decision, c.reason, c.score, c.runner_up_score, c.runner_up_name,
+           c.price_cents, b.label as bulk_box_label, c.scanned_at
     FROM cards c
     LEFT JOIN bulk_boxes b ON b.id = c.bulk_box_id
     WHERE c.session_id = ?
     ORDER BY c.seq
   `).all(session.id) as ManifestRow[];
 
-  const header = ['Seq', 'Name', 'Decision', 'Reason', 'Score', 'Runner-Up Score', 'Price', 'Bulk Box', 'Scanned At'];
+  // Gap is computed here rather than stored: it is exactly score - runner_up_score, and a derived
+  // column that can disagree with its inputs is worse than no column. It earns its place because
+  // it, not score, is what the confidence gate actually tests — sorting a manifest by Gap puts
+  // the run's real problems on top.
+  const header = ['Seq', 'Name', 'Decision', 'Reason', 'Score', 'Runner-Up Score', 'Gap',
+    'Runner-Up', 'Price', 'Bulk Box', 'Scanned At'];
   const lines = [stringifyCsvRow(header)];
 
   for (const row of rows) {
+    const gap = row.score !== null && row.runner_up_score !== null ? row.score - row.runner_up_score : null;
     lines.push(stringifyCsvRow([
       row.seq,
       row.name ?? '(unrecognized)',
@@ -154,6 +160,10 @@ export function buildManifestCsv(session: Session): string {
       row.reason,
       row.score,
       row.runner_up_score,
+      gap,
+      // Blank on rows written before the column existed — distinguishable from a scan that
+      // genuinely had no runner-up only by the score column, which is the honest state.
+      row.runner_up_name ?? '',
       row.price_cents !== null ? (row.price_cents / 100).toFixed(2) : '',
       row.bulk_box_label ?? '',
       new Date(row.scanned_at).toISOString(),
