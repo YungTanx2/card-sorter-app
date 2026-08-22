@@ -209,7 +209,12 @@ export async function fetchRaritySlotCounts(gameId: number, setIds: number[]): P
 }
 
 export function getGoalSlots(goal: Goal): GoalSlot[] {
-  const candidates = getCandidatesForSets(goal.setIds).filter(isSetSlotCandidate);
+  // Variant-scoped, and this one is load-bearing for progress rather than just recognition: a
+  // slot for a printing the goal doesn't collect can never fill, so leaving it in makes the
+  // denominator permanently unreachable and the goal impossible to complete. Note this can
+  // SHRINK totalSlots for a goal created before the filter existed — the removed slots are
+  // exactly the ones that were never fillable.
+  const candidates = getCandidatesForSets(goal.setIds, goal.variant).filter(isSetSlotCandidate);
   const owned = getOwnedCounts(goal.id);
   return assignSlots(candidates, goal.setIds, goal.binderRows, goal.binderCols, goal.excludedRarities)
     .map((slot) => ({
@@ -318,9 +323,11 @@ export function completeGoalSession(id: string): GoalSession {
 
 const insertGoalCard = db.prepare(`
   INSERT INTO goal_cards (goal_session_id, goal_id, seq, product_id, name, number, score,
-    runner_up_score, outcome, reason, voided, counts_toward_goal, thumb_jpeg, scanned_at)
+    runner_up_score, runner_up_product_id, runner_up_name, outcome, reason, voided,
+    counts_toward_goal, thumb_jpeg, scanned_at)
   VALUES (@goalSessionId, @goalId, @seq, @productId, @name, @number, @score,
-    @runnerUpScore, @outcome, @reason, 0, @countsTowardGoal, @thumbJpeg, @scannedAt)
+    @runnerUpScore, @runnerUpProductId, @runnerUpName, @outcome, @reason, 0,
+    @countsTowardGoal, @thumbJpeg, @scannedAt)
 `);
 const nextGoalSeq = db.prepare('SELECT COALESCE(MAX(seq), 0) + 1 AS n FROM goal_cards WHERE goal_session_id = ?');
 const selectGoalCard = db.prepare('SELECT * FROM goal_cards WHERE id = ?');
@@ -330,6 +337,7 @@ const setGoalCardVoided = db.prepare('UPDATE goal_cards SET voided = ? WHERE id 
 interface GoalCardRow {
   id: number; goal_session_id: string; goal_id: string; seq: number; product_id: number | null;
   name: string | null; number: string | null; score: number | null; runner_up_score: number | null;
+  runner_up_product_id: number | null; runner_up_name: string | null;
   outcome: GoalOutcome; reason: GoalReason; voided: number; counts_toward_goal: number;
   thumb_jpeg: Buffer | null; scanned_at: number;
 }
@@ -338,7 +346,9 @@ function toGoalCard(row: GoalCardRow): GoalCard {
   return {
     id: row.id, goalSessionId: row.goal_session_id, goalId: row.goal_id, seq: row.seq,
     productId: row.product_id, name: row.name, number: row.number, score: row.score,
-    runnerUpScore: row.runner_up_score, outcome: row.outcome, reason: row.reason,
+    runnerUpScore: row.runner_up_score,
+    runnerUpProductId: row.runner_up_product_id, runnerUpName: row.runner_up_name,
+    outcome: row.outcome, reason: row.reason,
     voided: row.voided === 1, countsTowardGoal: row.counts_toward_goal === 1,
     hasThumb: row.thumb_jpeg != null, scannedAt: row.scanned_at,
   };
@@ -396,7 +406,9 @@ export async function scanGoalCard(goalSessionId: string, imageBuffer: Buffer): 
 
   let top, runnerUp, candidates: CandidateCard[];
   try {
-    candidates = getCandidatesForSets(goal.setIds);
+    // Scoped to the goal's printing — a goal is already single-variant by construction, so a
+    // product with no price in that printing is not a card this goal can ever want (tcgcsv.ts).
+    candidates = getCandidatesForSets(goal.setIds, goal.variant);
     const match = await matchCard(imageBuffer, candidates);
     top = match.top;
     runnerUp = match.runnerUp;
@@ -411,6 +423,11 @@ export async function scanGoalCard(goalSessionId: string, imageBuffer: Buffer): 
   const scannedAt = Date.now();
   const countsTowardGoal = session.dryRun ? 0 : 1;
 
+  // See session.ts — the runner-up's identity is what makes a small gap diagnosable, so it is
+  // stamped on every row rather than only on the ones that failed the gate.
+  const runnerUpProductId = runnerUp?.productId ?? null;
+  const runnerUpName = runnerUp ? candidates.find((c) => c.productId === runnerUp!.productId)?.name ?? null : null;
+
   const record = async (
     outcome: GoalOutcome, reason: GoalReason, candidate: CandidateCard | null,
     score: number | null, withThumb: boolean,
@@ -419,6 +436,7 @@ export async function scanGoalCard(goalSessionId: string, imageBuffer: Buffer): 
       goalSessionId, goalId: goal.id, seq,
       productId: candidate?.productId ?? null, name: candidate?.name ?? null,
       number: candidate?.number ?? null, score, runnerUpScore: runnerUp?.score ?? null,
+      runnerUpProductId, runnerUpName,
       outcome, reason, countsTowardGoal,
       thumbJpeg: withThumb ? await makeThumb(imageBuffer) : null,
       scannedAt,
@@ -568,6 +586,9 @@ export function getReviewStrip(goalSessionId: string): ReviewEntry[] {
   const session = getGoalSession(goalSessionId);
   if (!session) throw new Error(`Goal session ${goalSessionId} not found`);
   const goal = getGoal(session.goalId)!;
+  // Deliberately NOT variant-scoped: this is a lookup for historical rows, and a scan recorded
+  // before the filter existed may point at a product the current variant excludes. Narrowing it
+  // would blank that row's reference image and make the very rows worth reviewing unreviewable.
   const byId = new Map(getCandidatesForSets(goal.setIds).map((c) => [c.productId, c]));
 
   return getGoalCardsForSession(goalSessionId)

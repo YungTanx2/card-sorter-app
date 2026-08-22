@@ -129,9 +129,9 @@ function currentOrNewBulkBox(session: Session): BulkBox {
 
 const insertCard = db.prepare(`
   INSERT INTO cards (session_id, seq, product_id, sku_id, name, score, runner_up_score,
-    price_cents, decision, reason, bulk_box_id, scanned_at)
+    runner_up_product_id, runner_up_name, price_cents, decision, reason, bulk_box_id, scanned_at)
   VALUES (@sessionId, @seq, @productId, @skuId, @name, @score, @runnerUpScore,
-    @priceCents, @decision, @reason, @bulkBoxId, @scannedAt)
+    @runnerUpProductId, @runnerUpName, @priceCents, @decision, @reason, @bulkBoxId, @scannedAt)
 `);
 const nextSeq = db.prepare('SELECT COALESCE(MAX(seq), 0) + 1 as n FROM cards WHERE session_id = ?');
 
@@ -196,7 +196,9 @@ export async function scanCard(sessionId: string, imageBuffer: Buffer): Promise<
 
   let top, runnerUp, candidates;
   try {
-    candidates = getCandidatesForSets(session.setIds);
+    // Scoped to the session's printing — a product with no price in this variant is not a
+    // possible answer for this run, and leaving it in only manufactures ties (see tcgcsv.ts).
+    candidates = getCandidatesForSets(session.setIds, session.variant);
     const match = await matchCard(imageBuffer, candidates);
     top = match.top;
     runnerUp = match.runnerUp;
@@ -210,11 +212,18 @@ export async function scanCard(sessionId: string, imageBuffer: Buffer): Promise<
   const seq = (nextSeq.get(sessionId) as { n: number }).n;
   const scannedAt = Date.now();
 
+  // Resolved once and stamped on every row, including confident ones. A confident scan's
+  // runner-up is what makes the gap interpretable — "beat its own foil twin by 0.004" and
+  // "beat an unrelated card by 0.004" are different problems, and only the identity says which.
+  const runnerUpProductId = runnerUp?.productId ?? null;
+  const runnerUpName = runnerUp ? candidates.find((c) => c.productId === runnerUp!.productId)?.name ?? null : null;
+
   const recordBulk = (reason: DecisionReason, productId: number | null, name: string | null, score: number | null, skuId: number | null, priceCents: number | null): ScanCardResult => {
     const box = currentOrNewBulkBox(session);
     incrementBulkBoxCount.run(box.id);
     const info = insertCard.run({
       sessionId, seq, productId, skuId, name, score, runnerUpScore: runnerUp?.score ?? null,
+      runnerUpProductId, runnerUpName,
       priceCents, decision: 'bulk', reason, bulkBoxId: box.id, scannedAt,
     });
     return { decision: 'bulk', reason, card: getCard(info.lastInsertRowid as number) };
@@ -249,8 +258,8 @@ export async function scanCard(sessionId: string, imageBuffer: Buffer): Promise<
   const skuId = await resolveSkuForKeeper(top.productId, session.variant, session.condition);
   const info = insertCard.run({
     sessionId, seq, productId: top.productId, skuId, name,
-    score: top.score, runnerUpScore: runnerUp?.score ?? null, priceCents, decision: 'keeper',
-    reason, bulkBoxId: null, scannedAt,
+    score: top.score, runnerUpScore: runnerUp?.score ?? null, runnerUpProductId, runnerUpName,
+    priceCents, decision: 'keeper', reason, bulkBoxId: null, scannedAt,
   });
   return { decision: 'keeper', reason, card: getCard(info.lastInsertRowid as number) };
 }
@@ -259,14 +268,17 @@ const selectCard = db.prepare('SELECT * FROM cards WHERE id = ?');
 
 interface CardRow {
   id: number; session_id: string; seq: number; product_id: number | null; sku_id: number | null;
-  name: string | null; score: number | null; runner_up_score: number | null; price_cents: number | null;
+  name: string | null; score: number | null; runner_up_score: number | null;
+  runner_up_product_id: number | null; runner_up_name: string | null; price_cents: number | null;
   decision: Decision; reason: DecisionReason; bulk_box_id: number | null; scanned_at: number;
 }
 
 function toCard(row: CardRow): CardRecord {
   return {
     id: row.id, sessionId: row.session_id, seq: row.seq, productId: row.product_id, skuId: row.sku_id,
-    name: row.name, score: row.score, runnerUpScore: row.runner_up_score, priceCents: row.price_cents,
+    name: row.name, score: row.score, runnerUpScore: row.runner_up_score,
+    runnerUpProductId: row.runner_up_product_id, runnerUpName: row.runner_up_name,
+    priceCents: row.price_cents,
     decision: row.decision, reason: row.reason, bulkBoxId: row.bulk_box_id, scannedAt: row.scanned_at,
   };
 }
