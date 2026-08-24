@@ -117,9 +117,11 @@ export function completeGoal(id: string): Goal {
  * price-sorter and expensive to rebuild.
  */
 export const deleteGoal = db.transaction((id: string) => {
-  // Before goal_cards, since these hang off card ids. Explicit because foreign_keys is off — see
-  // the capture_samples comment in db.ts; a REFERENCES clause alone would silently orphan the
-  // largest rows in the schema.
+  // Before capture_samples, since labels hang off sample ids; before goal_cards, since samples
+  // hang off card ids. Explicit because foreign_keys is off — see the capture_samples comment in
+  // db.ts; a REFERENCES clause alone would silently orphan these rows.
+  db.prepare(`DELETE FROM capture_labels WHERE capture_sample_id IN
+    (SELECT s.id FROM capture_samples s JOIN goal_cards c ON c.id = s.goal_card_id WHERE c.goal_id = ?)`).run(id);
   db.prepare(`DELETE FROM capture_samples WHERE goal_card_id IN
     (SELECT id FROM goal_cards WHERE goal_id = ?)`).run(id);
   db.prepare('DELETE FROM goal_cards WHERE goal_id = ?').run(id);
@@ -531,14 +533,21 @@ export function saveCaptureSample(
   }
 }
 
+export type CaptureLabelVerdict = 'card' | 'not-a-card' | 'not-in-set';
+
 export interface CaptureSampleRow {
   id: number; goalCardId: number; frameW: number; frameH: number; cropJson: string;
   productId: number | null; name: string | null; number: string | null;
   outcome: GoalOutcome; reason: GoalReason; score: number | null; voided: boolean;
+  /** Explicit ground truth from the labelling view — see capture_labels' doc in db.ts. Distinct
+   *  from voided/productId above (the review strip's opinion): this is null until a human has
+   *  actually looked at the frame, whereas voided is only ever set on 'needed' outcomes. */
+  labelVerdict: CaptureLabelVerdict | null;
+  labelProductId: number | null;
 }
 
 /**
- * Stored samples for a run, joined to the card each came from.
+ * Stored samples for a run, joined to the card each came from and to any explicit label.
  *
  * `voided` carries the review strip's verdict: false on an accepted row means the operator
  * confirmed the match, so productId is ground truth. A voided row is known-wrong but its TRUE
@@ -549,15 +558,18 @@ export interface CaptureSampleRow {
 export function getCaptureSamples(goalSessionId: string): CaptureSampleRow[] {
   return db.prepare(`
     SELECT s.id, s.goal_card_id, s.frame_w, s.frame_h, s.crop_json,
-           c.product_id, c.name, c.number, c.outcome, c.reason, c.score, c.voided
+           c.product_id, c.name, c.number, c.outcome, c.reason, c.score, c.voided,
+           l.verdict as label_verdict, l.product_id as label_product_id
       FROM capture_samples s
       JOIN goal_cards c ON c.id = s.goal_card_id
+      LEFT JOIN capture_labels l ON l.capture_sample_id = s.id
      WHERE c.goal_session_id = ?
      ORDER BY c.seq
   `).all(goalSessionId).map((r: any) => ({
     id: r.id, goalCardId: r.goal_card_id, frameW: r.frame_w, frameH: r.frame_h,
     cropJson: r.crop_json, productId: r.product_id, name: r.name, number: r.number,
     outcome: r.outcome, reason: r.reason, score: r.score, voided: r.voided === 1,
+    labelVerdict: r.label_verdict ?? null, labelProductId: r.label_product_id ?? null,
   }));
 }
 
@@ -565,6 +577,51 @@ export function getCaptureSampleFrame(id: number): Buffer | null {
   const row = db.prepare('SELECT frame_jpeg FROM capture_samples WHERE id = ?').get(id) as
     { frame_jpeg: Buffer } | undefined;
   return row?.frame_jpeg ?? null;
+}
+
+export interface CaptureSampleContext {
+  id: number;
+  frame: Buffer;
+  frameW: number;
+  frameH: number;
+  /** Fractions as getCrop() returns them, or null if this sample predates crop tracking. */
+  crop: { left: number; top: number; width: number; height: number } | null;
+  goal: Goal;
+}
+
+/**
+ * Resolves everything the labelling view needs to score a stored frame against its own goal's
+ * candidate pool: the goal_card -> goal_session -> goal chain, so the top-K shown for labelling
+ * uses the SAME variant-scoped pool recognition actually matched against, not the whole game's
+ * catalog.
+ */
+export function getCaptureSampleContext(sampleId: number): CaptureSampleContext | undefined {
+  const row = db.prepare(`
+    SELECT s.frame_jpeg, s.frame_w, s.frame_h, s.crop_json, g.*
+      FROM capture_samples s
+      JOIN goal_cards c ON c.id = s.goal_card_id
+      JOIN goal_sessions gs ON gs.id = c.goal_session_id
+      JOIN goals g ON g.id = gs.goal_id
+     WHERE s.id = ?
+  `).get(sampleId) as ({ frame_jpeg: Buffer; frame_w: number; frame_h: number; crop_json: string } & GoalRow) | undefined;
+  if (!row) return undefined;
+  let crop: CaptureSampleContext['crop'] = null;
+  try { crop = row.crop_json ? JSON.parse(row.crop_json) : null; } catch { /* keep null */ }
+  return { id: sampleId, frame: row.frame_jpeg, frameW: row.frame_w, frameH: row.frame_h, crop, goal: toGoal(row) };
+}
+
+const upsertCaptureLabel = db.prepare(`
+  INSERT INTO capture_labels (capture_sample_id, verdict, product_id, labelled_at)
+  VALUES (@sampleId, @verdict, @productId, @labelledAt)
+  ON CONFLICT(capture_sample_id) DO UPDATE SET
+    verdict = excluded.verdict, product_id = excluded.product_id, labelled_at = excluded.labelled_at
+`);
+
+/** Records (or overwrites) ground truth for one stored frame. `productId` is required for
+ *  verdict='card' and ignored otherwise — enforced by the caller (server.ts), not here, since
+ *  this is a pure data-layer write. */
+export function saveCaptureLabel(sampleId: number, verdict: CaptureLabelVerdict, productId: number | null): void {
+  upsertCaptureLabel.run({ sampleId, verdict, productId, labelledAt: Date.now() });
 }
 
 export function getGoalCardThumb(id: number): Buffer | null {

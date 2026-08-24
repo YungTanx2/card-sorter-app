@@ -2,7 +2,9 @@ import express from 'express';
 import multer from 'multer';
 import path from 'path';
 import { db } from './db';
-import { fetchCategories, fetchSets, fetchVariants, fetchRarities } from './tcgcsv';
+import { fetchCategories, fetchSets, fetchVariants, fetchRarities, getCandidatesForSets } from './tcgcsv';
+import { scoreCandidates } from './embeddings';
+import sharp from 'sharp';
 import { getSettings, updateSettings } from './settings';
 import { StallError } from './errors';
 import {
@@ -16,6 +18,7 @@ import {
   saveCaptureSample, getCaptureSamples, getCaptureSampleFrame, fetchRaritySlotCounts,
   scanGoalCard, getGoalCardsForSession, getGoalCardThumb, setGoalCardVoid,
   getReviewStrip, getFilingList,
+  getCaptureSampleContext, saveCaptureLabel, CaptureLabelVerdict,
 } from './goals';
 import { buildKeeperCsv, buildManifestCsv } from './export';
 import { GoalConfig, SessionConfig } from './types';
@@ -416,6 +419,81 @@ app.post('/api/goal-session/:id/scan',
 app.get('/api/goal-session/:id/samples', (req, res) => {
   if (!requireGoalSession(req, res)) return;
   res.json(getCaptureSamples(req.params.id));
+});
+
+/** Mirrors capture.js's cropRectPx()/_triggerCapture() in absolute pixels, clamped so a
+ *  degenerate stored crop (a sample from before crop tracking, or a corrupt row) can't produce
+ *  a zero-size sharp.extract() and 500 the labelling view. */
+function sampleCropRectPx(frameW: number, frameH: number, crop: { left: number; top: number; width: number; height: number } | null) {
+  if (!crop) return { left: 0, top: 0, width: frameW, height: frameH };
+  const left = Math.max(0, Math.min(frameW - 1, Math.round(crop.left * frameW)));
+  const top = Math.max(0, Math.min(frameH - 1, Math.round(crop.top * frameH)));
+  const width = Math.max(1, Math.min(frameW - left, Math.round(crop.width * frameW)));
+  const height = Math.max(1, Math.min(frameH - top, Math.round(crop.height * frameH)));
+  return { left, top, width, height };
+}
+
+/**
+ * Re-scores a stored full frame against its own goal's candidate pool — the labelling view's
+ * "what did recognition actually see" panel. Deliberately re-crops and re-resizes to match
+ * capture.js's _triggerCapture() (crop, then cap width at 640) rather than embedding the whole
+ * stored frame, so the top-K shown is the SAME input production recognition scored, not an
+ * easier full-card view that would make failures look better than they are.
+ */
+app.get('/api/capture-sample/:id/candidates', async (req, res) => {
+  const id = Number(req.params.id);
+  const k = Math.min(Math.max(Number(req.query.k) || 8, 1), 24);
+  const ctx = getCaptureSampleContext(id);
+  if (!ctx) {
+    res.status(404).json({ error: 'No sample with that id.' });
+    return;
+  }
+  try {
+    const rect = sampleCropRectPx(ctx.frameW, ctx.frameH, ctx.crop);
+    const w = Math.min(rect.width, 640);
+    const h = Math.max(1, Math.round(w * (rect.height / rect.width)));
+    const cropped = await sharp(ctx.frame).extract(rect).resize({ width: w, height: h }).toBuffer();
+
+    const candidates = getCandidatesForSets(ctx.goal.setIds, ctx.goal.variant);
+    const scored = await scoreCandidates(cropped, candidates);
+    const byId = new Map(candidates.map((c) => [c.productId, c]));
+
+    res.json({
+      goalId: ctx.goal.id,
+      goalName: ctx.goal.name,
+      candidates: scored.slice(0, k).map((s) => {
+        const c = byId.get(s.productId);
+        return {
+          productId: s.productId, score: s.score,
+          name: c?.name ?? null, number: c?.number ?? null, imageUrl: c?.imageUrl ?? null,
+        };
+      }),
+    });
+  } catch (err) {
+    console.error('[capture-sample/candidates]', err);
+    res.status(500).json({ error: 'Could not score this sample.' });
+  }
+});
+
+const LABEL_VERDICTS: CaptureLabelVerdict[] = ['card', 'not-a-card', 'not-in-set'];
+
+/** Records ground truth for one stored frame — see capture_labels' doc in db.ts. Idempotent:
+ *  re-labelling the same sample overwrites rather than accumulating (the labelling view's Undo
+ *  is just calling this again with a different verdict). */
+app.post('/api/capture-sample/:id/label', (req, res) => {
+  const id = Number(req.params.id);
+  const verdict = req.body?.verdict as CaptureLabelVerdict;
+  if (!LABEL_VERDICTS.includes(verdict)) {
+    res.status(400).json({ error: `verdict must be one of: ${LABEL_VERDICTS.join(', ')}` });
+    return;
+  }
+  const productId = verdict === 'card' ? Number(req.body?.productId) : null;
+  if (verdict === 'card' && !Number.isFinite(productId)) {
+    res.status(400).json({ error: 'productId is required when verdict is "card".' });
+    return;
+  }
+  saveCaptureLabel(id, verdict, productId);
+  res.json({ ok: true });
 });
 
 app.get('/api/capture-sample/:id/frame', (req, res) => {

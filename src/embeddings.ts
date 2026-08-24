@@ -101,13 +101,13 @@ export async function prewarmEmbeddings(candidates: CandidateCard[]): Promise<vo
 }
 
 /**
- * The core recognition call: embeds the capture, scores it against every candidate's cached
- * embedding by cosine similarity, returns the sorted top-2 (mirrors TCGTracking's top/runnerUp
- * shape session.ts already consumes — this is a closer drop-in than a candidate-list-prompt
- * approach would have been, since there's no serialization step and a real runner-up falls
- * out of the ranking for free, preserving the minGap confidence-gate concept unchanged).
+ * Scores an image against every candidate's cached embedding by cosine similarity, sorted
+ * descending. Factored out of matchCard so there is exactly one cosine-scoring loop — the
+ * labelling view (server.ts's /api/capture-sample/:id/candidates) needs the full ranked list,
+ * not just top-2, and a second copy of this loop could silently drift from the one that actually
+ * decides routing.
  */
-export async function matchCard(imageBuffer: Buffer, candidates: CandidateCard[]): Promise<{ top: EmbeddingMatch | null; runnerUp: EmbeddingMatch | null }> {
+export async function scoreCandidates(imageBuffer: Buffer, candidates: CandidateCard[]): Promise<EmbeddingMatch[]> {
   const queryEmbedding = await embedImage(imageBuffer);
 
   const scored: EmbeddingMatch[] = [];
@@ -118,6 +118,17 @@ export async function matchCard(imageBuffer: Buffer, candidates: CandidateCard[]
     scored.push({ productId: c.productId, score });
   }
   scored.sort((a, b) => b.score - a.score);
+  return scored;
+}
 
+/**
+ * The core recognition call: scores the capture against every candidate, returns the top-2
+ * (mirrors TCGTracking's top/runnerUp shape session.ts already consumes — this is a closer
+ * drop-in than a candidate-list-prompt approach would have been, since there's no serialization
+ * step and a real runner-up falls out of the ranking for free, preserving the minGap
+ * confidence-gate concept unchanged).
+ */
+export async function matchCard(imageBuffer: Buffer, candidates: CandidateCard[]): Promise<{ top: EmbeddingMatch | null; runnerUp: EmbeddingMatch | null }> {
+  const scored = await scoreCandidates(imageBuffer, candidates);
   return { top: scored[0] ?? null, runnerUp: scored[1] ?? null };
 }
