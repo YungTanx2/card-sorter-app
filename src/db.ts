@@ -221,6 +221,27 @@ db.exec(`
 
   CREATE INDEX IF NOT EXISTS idx_capture_samples_card ON capture_samples(goal_card_id);
 
+  -- Ground truth for capture_samples, entered through the labelling view (public/labels.html).
+  --
+  -- Why this can't just reuse the review strip's verdict (goal_cards.voided): the review strip
+  -- only shows 'needed' outcomes, so it has an opinion on roughly half the samples and none at
+  -- all on 'low-confidence' extras — precisely the failures a recognition A/B most needs ground
+  -- truth for. scripts/export-samples.ts's OLD labelled rule (!voided && outcome === 'needed')
+  -- could therefore only ever measure successes: a change that "rescues" a low-confidence frame
+  -- to the WRONG card would score as a pure win, because nothing recorded what it actually was.
+  --
+  -- One row per sample (capture_sample_id is the primary key, not a separate id) — labelling is
+  -- meant to converge to a single verdict, and a second pass overwrites rather than accumulating.
+  -- verdict: 'card' (product_id is the true identity) | 'not-a-card' (nothing there — hand,
+  -- platform, packaging) | 'not-in-set' (a real card, but not one of this goal's candidates —
+  -- still a valid frame for testing whether recognition correctly abstains on it).
+  CREATE TABLE IF NOT EXISTS capture_labels (
+    capture_sample_id INTEGER PRIMARY KEY REFERENCES capture_samples(id),
+    verdict           TEXT NOT NULL,
+    product_id        INTEGER,
+    labelled_at       INTEGER NOT NULL
+  );
+
   -- Manual corrections that aren't tied to a scan — "I already own this one", "I sold that one".
   -- An append-only delta log rather than an editable count, for the same reason as above.
   CREATE TABLE IF NOT EXISTS goal_adjustments (

@@ -1,0 +1,457 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+<title>Label Samples</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg: #0f1117;
+    --surface: #1a1d27;
+    --surface2: #222636;
+    --border: #2d3148;
+    --text: #e2e8f0;
+    --muted: #8892a4;
+    --accent: #6366f1;
+    --green: #22c55e;
+    --red: #ef4444;
+    --yellow: #eab308;
+  }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: var(--bg); color: var(--text); min-height: 100vh;
+    display: flex; flex-direction: column;
+  }
+
+  header {
+    display: flex; align-items: center; gap: 0.5rem; padding: 0.75rem 1rem;
+    background: var(--surface); border-bottom: 1px solid var(--border);
+    position: sticky; top: 0; z-index: 10;
+  }
+  header h1 { font-size: 1rem; font-weight: 600; margin-right: auto; }
+  header nav { display: flex; gap: 0.35rem; flex-wrap: wrap; }
+  header nav a.nav-link {
+    display: inline-flex; align-items: center; color: var(--accent); border: 1px solid var(--border);
+    border-radius: 6px; padding: 0.35rem 0.6rem; font-size: 0.8rem; text-decoration: none;
+  }
+
+  main { flex: 1; padding: 1rem; max-width: 720px; width: 100%; margin: 0 auto; }
+  section[hidden] { display: none !important; }
+  h2 { font-size: 1.05rem; margin-bottom: 0.5rem; }
+
+  button.primary {
+    width: 100%; background: var(--accent); color: white; border: none; border-radius: 10px;
+    padding: 0.9rem; font-size: 1rem; font-weight: 600; margin-top: 1.25rem; cursor: pointer;
+  }
+  button.primary:disabled { opacity: 0.5; }
+  button.secondary {
+    background: var(--surface2); color: var(--text); border: 1px solid var(--border);
+    border-radius: 8px; padding: 0.6rem 0.9rem; font-size: 0.9rem; cursor: pointer;
+  }
+  button.danger { background: var(--red); color: white; border: none; }
+  button.confirm { background: var(--green); color: #06210f; border: none; font-weight: 700; }
+
+  .row { display: flex; gap: 0.6rem; }
+  .row > * { flex: 1; }
+  .hint { font-size: 0.78rem; color: var(--muted); margin-top: 0.3rem; }
+  .error-box { background: #3a1a1a; border: 1px solid var(--red); color: #fca5a5; border-radius: 8px; padding: 0.75rem; margin-top: 0.75rem; font-size: 0.85rem; }
+
+  ul.pick-list { list-style: none; }
+  ul.pick-list li {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+    padding: 0.8rem; margin-bottom: 0.6rem; cursor: pointer;
+  }
+  ul.pick-list li:hover { border-color: var(--accent); }
+  .pick-name { font-weight: 600; }
+  .pick-meta { font-size: 0.75rem; color: var(--muted); margin-top: 0.15rem; }
+
+  /* ── Queue header / progress ─────────────────────────────── */
+  .queue-bar {
+    display: flex; justify-content: space-between; align-items: center;
+    font-size: 0.8rem; color: var(--muted); margin-bottom: 0.75rem;
+  }
+  .queue-bar strong { color: var(--text); }
+  .filter-row { display: flex; gap: 0.4rem; margin-bottom: 0.9rem; flex-wrap: wrap; }
+  .filter-row button {
+    background: var(--surface); border: 1px solid var(--border); color: var(--muted);
+    border-radius: 999px; padding: 0.3rem 0.7rem; font-size: 0.75rem; cursor: pointer;
+  }
+  .filter-row button.active { color: var(--text); border-color: var(--accent); background: var(--surface2); }
+
+  /* ── Sample panel ─────────────────────────────────────────── */
+  .sample-frame {
+    background: #000; border-radius: 12px; overflow: hidden; max-height: 55vh;
+    display: flex; align-items: center; justify-content: center; border: 1px solid var(--border);
+  }
+  .sample-frame img { max-width: 100%; max-height: 55vh; display: block; }
+
+  .sample-meta {
+    margin-top: 0.6rem; padding: 0.7rem; background: var(--surface); border: 1px solid var(--border);
+    border-radius: 10px; font-size: 0.82rem; line-height: 1.5;
+  }
+  .sample-meta .top-name { font-weight: 600; }
+  .badge {
+    display: inline-block; font-size: 0.68rem; font-weight: 700; letter-spacing: 0.03em;
+    text-transform: uppercase; padding: 0.15rem 0.45rem; border-radius: 5px; margin-left: 0.4rem;
+  }
+  .badge.needed { background: rgba(34,197,94,0.2); color: var(--green); }
+  .badge.extra  { background: rgba(239,68,68,0.2); color: var(--red); }
+  .badge.labelled { background: rgba(99,102,241,0.25); color: #a5b4fc; }
+  .badge.unlabelled { background: rgba(234,179,8,0.2); color: var(--yellow); }
+
+  .confirm-row { margin-top: 0.75rem; }
+
+  .candidates-heading { font-size: 0.8rem; color: var(--muted); margin: 0.9rem 0 0.5rem; }
+  .candidate-grid {
+    display: grid; grid-template-columns: repeat(4, 1fr); gap: 0.5rem;
+  }
+  .candidate {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+    padding: 0.35rem; cursor: pointer; text-align: center; font-size: 0.68rem; color: var(--muted);
+  }
+  .candidate:hover { border-color: var(--accent); }
+  .candidate.is-top { border-color: var(--yellow); }
+  .candidate img { width: 100%; aspect-ratio: 5/7; object-fit: cover; border-radius: 4px; background: #000; }
+  .candidate .cname { color: var(--text); font-weight: 600; margin-top: 0.25rem; display: block; }
+  .candidate .cscore { font-family: monospace; }
+
+  .verdict-row { display: flex; gap: 0.5rem; margin-top: 0.9rem; }
+  .verdict-row button { flex: 1; }
+
+  .nav-row { display: flex; gap: 0.5rem; margin-top: 1rem; }
+  .nav-row button { flex: 1; }
+
+  .loading { text-align: center; padding: 2rem; color: var(--muted); }
+  .empty { text-align: center; padding: 2rem; color: var(--muted); }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Label Samples</h1>
+  <nav>
+    <a class="nav-link" href="/sets.html">← Set Builder</a>
+  </nav>
+</header>
+
+<main>
+
+  <!-- ══════════════════════ GOALS ══════════════════════ -->
+  <section id="view-goals">
+    <h2>Pick a goal</h2>
+    <p class="hint">Ground truth for capture_samples — the stored frames Set Builder collection mode kept, including the low-confidence extras the review strip never shows. See the plan for why this exists.</p>
+    <ul class="pick-list" id="goals-list"></ul>
+    <div id="goals-empty" class="empty" hidden>No goals yet — create one in Set Builder first.</div>
+  </section>
+
+  <!-- ══════════════════════ SESSIONS ══════════════════════ -->
+  <section id="view-sessions" hidden>
+    <h2 id="sessions-goal-name"></h2>
+    <p class="hint">Pick a run to label. Only runs collected with the "Collect calibration samples" toggle on have stored frames.</p>
+    <ul class="pick-list" id="sessions-list"></ul>
+    <div id="sessions-empty" class="empty" hidden>No sessions with stored samples for this goal.</div>
+    <button class="secondary" id="sessions-back-btn" style="margin-top:0.75rem;">← Goals</button>
+  </section>
+
+  <!-- ══════════════════════ QUEUE ══════════════════════ -->
+  <section id="view-queue" hidden>
+    <div class="queue-bar">
+      <span><strong id="queue-labelled-count">0</strong> / <span id="queue-total-count">0</span> labelled</span>
+      <button class="secondary" id="queue-back-btn">← Sessions</button>
+    </div>
+    <div class="filter-row">
+      <button data-filter="unlabelled" class="active">Unlabelled</button>
+      <button data-filter="low-confidence">Low-confidence</button>
+      <button data-filter="all">All</button>
+    </div>
+
+    <div id="queue-empty" class="empty" hidden>Nothing left in this filter.</div>
+
+    <div id="queue-panel" hidden>
+      <div class="sample-frame"><img id="sample-img" alt="Stored capture frame" /></div>
+
+      <div class="sample-meta">
+        <span>Seq <span id="sample-seq"></span> ·
+          <span class="badge" id="sample-outcome-badge"></span>
+          <span id="sample-reason"></span> ·
+          score <span id="sample-score"></span>
+        </span>
+        <div class="top-name" id="sample-top-name"></div>
+        <div id="sample-label-status"></div>
+      </div>
+
+      <div class="confirm-row" id="confirm-row" hidden>
+        <button class="confirm" id="confirm-top-btn" style="width:100%;"></button>
+      </div>
+
+      <div class="candidates-heading">Top matches — click the right one, or use the buttons below</div>
+      <div id="candidates-loading" class="loading" hidden>Scoring against the catalog…</div>
+      <div class="candidate-grid" id="candidate-grid"></div>
+
+      <div class="verdict-row">
+        <button class="secondary" id="not-a-card-btn">Not a card</button>
+        <button class="secondary" id="not-in-set-btn">Not in this set</button>
+      </div>
+
+      <div class="nav-row">
+        <button class="secondary" id="prev-btn">← Prev</button>
+        <button class="secondary" id="skip-btn">Skip →</button>
+      </div>
+    </div>
+  </section>
+
+  <div id="error-box" class="error-box" hidden></div>
+
+</main>
+
+<script src="/capture.js"></script>
+<script>
+(function () {
+  'use strict';
+  const { api } = window.CardSorterCapture;
+  const $ = (id) => document.getElementById(id);
+
+  function showError(err) {
+    $('error-box').hidden = false;
+    $('error-box').textContent = err && err.message ? err.message : String(err);
+  }
+  function clearError() { $('error-box').hidden = true; }
+
+  // ── view switching ──────────────────────────────────────────────────────
+  const views = ['goals', 'sessions', 'queue'];
+  function showView(name) {
+    views.forEach((v) => { $('view-' + v).hidden = v !== name; });
+  }
+
+  let currentGoal = null;
+  let currentSessionId = null;
+  let samples = [];        // full CaptureSampleRow[] for the current session
+  let filter = 'unlabelled';
+  let queue = [];          // filtered+sorted view of `samples`
+  let queueIndex = 0;
+  let currentCandidates = null; // cached top-K for the sample currently on screen
+
+  // ── GOALS ────────────────────────────────────────────────────────────────
+  async function loadGoals() {
+    clearError();
+    let goals = [];
+    try { goals = await api('/api/goals'); } catch (err) { showError(err); return; }
+    const list = $('goals-list');
+    list.innerHTML = '';
+    $('goals-empty').hidden = goals.length > 0;
+    goals.forEach((g) => {
+      const li = document.createElement('li');
+      li.innerHTML = '<div class="pick-name">' + g.name + '</div>' +
+        '<div class="pick-meta">' + g.gameName + ' · ' + g.variant + '</div>';
+      li.addEventListener('click', () => openGoal(g));
+      list.appendChild(li);
+    });
+  }
+
+  async function openGoal(goal) {
+    clearError();
+    currentGoal = goal;
+    $('sessions-goal-name').textContent = goal.name;
+    let sessions = [];
+    try {
+      const res = await api('/api/goals/' + goal.id);
+      sessions = res.sessions || [];
+    } catch (err) { showError(err); return; }
+
+    const list = $('sessions-list');
+    list.innerHTML = '';
+    // A session might have zero stored samples (collection wasn't on) — surface count so the
+    // operator doesn't click into an empty one. Cheap enough to fetch all of them up front since
+    // a goal realistically has single-digit sessions.
+    const withCounts = [];
+    for (const s of sessions) {
+      let n = 0;
+      try { n = (await api('/api/goal-session/' + s.id + '/samples')).length; } catch { /* leave 0 */ }
+      withCounts.push({ session: s, count: n });
+    }
+    const nonEmpty = withCounts.filter((w) => w.count > 0);
+    $('sessions-empty').hidden = nonEmpty.length > 0;
+    nonEmpty
+      .sort((a, b) => b.session.createdAt - a.session.createdAt)
+      .forEach(({ session, count }) => {
+        const li = document.createElement('li');
+        const date = new Date(session.createdAt).toLocaleString();
+        li.innerHTML = '<div class="pick-name">' + date + (session.dryRun ? ' (dry run)' : '') + '</div>' +
+          '<div class="pick-meta">' + count + ' stored samples · ' + session.status + '</div>';
+        li.addEventListener('click', () => openSession(session.id));
+        list.appendChild(li);
+      });
+    showView('sessions');
+  }
+
+  $('sessions-back-btn').addEventListener('click', () => showView('goals'));
+
+  // ── SESSIONS -> QUEUE ────────────────────────────────────────────────────
+  async function openSession(sessionId) {
+    clearError();
+    currentSessionId = sessionId;
+    try {
+      samples = await api('/api/goal-session/' + sessionId + '/samples');
+    } catch (err) { showError(err); return; }
+    filter = 'unlabelled';
+    setActiveFilterButton();
+    rebuildQueue();
+    showView('queue');
+  }
+
+  $('queue-back-btn').addEventListener('click', () => showView('sessions'));
+
+  // ── FILTER + QUEUE ───────────────────────────────────────────────────────
+  function setActiveFilterButton() {
+    document.querySelectorAll('.filter-row button').forEach((b) => {
+      b.classList.toggle('active', b.dataset.filter === filter);
+    });
+  }
+
+  document.querySelectorAll('.filter-row button').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      filter = btn.dataset.filter;
+      setActiveFilterButton();
+      rebuildQueue();
+    });
+  });
+
+  function isLabelled(s) { return s.labelVerdict != null; }
+
+  /** Low-confidence first (the failures with zero other ground truth), then by seq — matches
+   *  scans in the order they happened within each priority band. */
+  function rebuildQueue() {
+    let base = samples;
+    if (filter === 'unlabelled') base = samples.filter((s) => !isLabelled(s));
+    else if (filter === 'low-confidence') base = samples.filter((s) => s.reason === 'low-confidence');
+    queue = [...base].sort((a, b) => {
+      const pa = a.reason === 'low-confidence' ? 0 : 1;
+      const pb = b.reason === 'low-confidence' ? 0 : 1;
+      if (pa !== pb) return pa - pb;
+      return a.id - b.id;
+    });
+    queueIndex = 0;
+    renderCounts();
+    renderCurrent();
+  }
+
+  function renderCounts() {
+    $('queue-total-count').textContent = samples.length;
+    $('queue-labelled-count').textContent = samples.filter(isLabelled).length;
+  }
+
+  // ── CURRENT SAMPLE ───────────────────────────────────────────────────────
+  function currentSample() { return queue[queueIndex] || null; }
+
+  async function renderCurrent() {
+    clearError();
+    const s = currentSample();
+    $('queue-empty').hidden = !!s;
+    $('queue-panel').hidden = !s;
+    if (!s) return;
+
+    $('sample-img').src = '/api/capture-sample/' + s.id + '/frame';
+    $('sample-seq').textContent = s.id;
+    const badge = $('sample-outcome-badge');
+    badge.textContent = s.outcome;
+    badge.className = 'badge ' + s.outcome;
+    $('sample-reason').textContent = s.reason;
+    $('sample-score').textContent = s.score != null ? s.score.toFixed(4) : '—';
+    $('sample-top-name').textContent = s.name ? ('Recorded top guess: ' + s.name + (s.number ? ' (' + s.number + ')' : '')) : 'Recorded top guess: (none)';
+
+    const status = $('sample-label-status');
+    if (s.labelVerdict === 'card') {
+      status.innerHTML = '<span class="badge labelled">labelled</span> product ' + s.labelProductId;
+    } else if (s.labelVerdict) {
+      status.innerHTML = '<span class="badge labelled">labelled</span> ' + s.labelVerdict;
+    } else {
+      status.innerHTML = '<span class="badge unlabelled">unlabelled</span>';
+    }
+
+    // The one-click shortcut: when the recorded scan already names a product, confirming it
+    // avoids re-clicking the same thumbnail out of the candidate grid below — this is the common
+    // case for anything that wasn't low-confidence, since the review strip already agreed with it.
+    const confirmRow = $('confirm-row');
+    if (s.productId != null) {
+      confirmRow.hidden = false;
+      $('confirm-top-btn').textContent = 'Correct — it’s "' + s.name + '"';
+      $('confirm-top-btn').onclick = () => submitLabel(s, 'card', s.productId);
+    } else {
+      confirmRow.hidden = true;
+    }
+
+    currentCandidates = null;
+    await loadCandidates(s);
+  }
+
+  async function loadCandidates(s) {
+    const grid = $('candidate-grid');
+    grid.innerHTML = '';
+    $('candidates-loading').hidden = false;
+    try {
+      const res = await api('/api/capture-sample/' + s.id + '/candidates?k=8');
+      // Stale response guard: the operator can advance faster than a ~60ms embed+score round
+      // trip in principle (fast clicking on a slow connection) — only render if still current.
+      if (currentSample() !== s) return;
+      currentCandidates = res.candidates;
+      grid.innerHTML = '';
+      res.candidates.forEach((c) => {
+        const div = document.createElement('div');
+        div.className = 'candidate' + (c.productId === s.productId ? ' is-top' : '');
+        div.innerHTML =
+          '<img src="' + (c.imageUrl || '') + '" alt="' + (c.name || '') + '" loading="lazy" />' +
+          '<span class="cname">' + (c.name || '?') + '</span>' +
+          '<div class="cscore">' + c.score.toFixed(3) + '</div>';
+        div.addEventListener('click', () => submitLabel(s, 'card', c.productId));
+        grid.appendChild(div);
+      });
+    } catch (err) {
+      showError(err);
+    } finally {
+      if (currentSample() === s) $('candidates-loading').hidden = true;
+    }
+  }
+
+  async function submitLabel(s, verdict, productId) {
+    clearError();
+    try {
+      await api('/api/capture-sample/' + s.id + '/label', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ verdict, productId: productId ?? null }),
+      });
+    } catch (err) { showError(err); return; }
+    s.labelVerdict = verdict;
+    s.labelProductId = productId ?? null;
+    advance();
+  }
+
+  $('not-a-card-btn').addEventListener('click', () => { const s = currentSample(); if (s) submitLabel(s, 'not-a-card', null); });
+  $('not-in-set-btn').addEventListener('click', () => { const s = currentSample(); if (s) submitLabel(s, 'not-in-set', null); });
+  $('skip-btn').addEventListener('click', () => advance());
+  $('prev-btn').addEventListener('click', () => {
+    if (queueIndex > 0) { queueIndex--; renderCurrent(); }
+  });
+
+  /**
+   * Moves to the next item. Deliberately re-derives the queue rather than just incrementing —
+   * under the 'unlabelled' filter (the default), the item just labelled needs to DISAPPEAR from
+   * the list rather than leaving a gap, or the counter and the visible queue drift apart.
+   */
+  function advance() {
+    renderCounts();
+    if (filter === 'unlabelled') {
+      rebuildQueue(); // labelled item drops out; queueIndex resets to 0, i.e. the new front
+      return;
+    }
+    if (queueIndex < queue.length - 1) queueIndex++;
+    renderCurrent();
+  }
+
+  loadGoals();
+})();
+</script>
+</body>
+</html>

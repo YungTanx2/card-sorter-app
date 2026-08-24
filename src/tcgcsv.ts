@@ -224,7 +224,7 @@ function hasPrintingFor(row: CatalogRow, variant: string): boolean {
  *
  * `variant` narrows the pool to the printing being sorted. Passing it is strongly preferred:
  * the run already declared one, and matching against printings it cannot route is pure
- * ambiguity. It stays optional so offline tooling (scripts/crop-ab.ts) can score against the
+ * ambiguity. It stays optional so offline tooling (scripts/recognition-ab.ts) can score against the
  * unfiltered catalog when that is deliberately the question.
  */
 export function getCandidatesForSets(setIds: number[], variant?: string): CandidateCard[] {
