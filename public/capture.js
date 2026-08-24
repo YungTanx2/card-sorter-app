@@ -209,6 +209,8 @@ window.CardSorterCapture = (function () {
      *                                            { fullFrame, framing } when collecting samples.
      * @param {function}        [opts.onHopperEmpty] () => void — no activity for hopperEmptyTimeoutMs
      * @param {function}        [opts.onStall]    (reason) => void — 'scan-failed' | 'unsettled'
+     * @param {function}        [opts.onNoCard]   (presenceDiff) => void — settled on bare platform;
+     *                                            no capture, no tone, no card consumed
      * @param {boolean}         [opts.collectSamples] also encode the full uncropped frame, for
      *                                            offline crop-geometry A/B. Dry runs only.
      * @param {function}        [opts.onStateChange] (state) => void
@@ -220,6 +222,7 @@ window.CardSorterCapture = (function () {
       this.onCapture = opts.onCapture;
       this.onHopperEmpty = opts.onHopperEmpty || (() => {});
       this.onStall = opts.onStall || (() => {});
+      this.onNoCard = opts.onNoCard || (() => {});
       this.onStateChange = opts.onStateChange || (() => {});
       this.maxUploadBytes = opts.maxUploadBytes ?? MAX_UPLOAD_BYTES;
 
@@ -245,8 +248,8 @@ window.CardSorterCapture = (function () {
       this.fullCtx = this.fullCanvas.getContext('2d');
 
       this.diffCanvas = document.createElement('canvas');
-      this.diffCanvas.width = 64;
-      this.diffCanvas.height = 48;
+      this.diffCanvas.width = DIFF_W;
+      this.diffCanvas.height = DIFF_H;
       this.diffCtx = this.diffCanvas.getContext('2d', { willReadFrequently: true });
       this.captureCanvas = document.createElement('canvas');
       this.captureCtx = this.captureCanvas.getContext('2d');
@@ -261,6 +264,25 @@ window.CardSorterCapture = (function () {
       this.settings = settings;
       this.crop = getCrop(settings);
       if (this.cropGuide) renderCropGuide(this.cropGuide, this.crop);
+      this.emptyBaseline = decodeBaseline(settings.emptyPlatformBaseline, this.crop, settings.emptyPlatformCrop);
+    }
+
+    /** Samples the CURRENT frame as the "nothing is on the platform" reference. Returns the
+     *  base64 payload to save into settings, plus the crop it was taken under — a baseline is
+     *  only meaningful for the crop that produced it, so both travel together. */
+    captureEmptyBaseline() {
+      return { baseline: encodeGray(this._sampleGray()), crop: { ...this.crop } };
+    }
+
+    /**
+     * How far the current frame is from bare platform. null when no usable baseline is stored.
+     *
+     * Exposed so Calibrate can show it live: the operator can put a card in and take it out and
+     * watch the number move, which is the only honest way to pick a threshold for their rig.
+     */
+    presenceDiff() {
+      if (!this.emptyBaseline || !this.video.videoWidth) return null;
+      return meanAbsDiff(this._sampleGray(), this.emptyBaseline);
     }
 
     _setState(next) {
@@ -357,14 +379,7 @@ window.CardSorterCapture = (function () {
     _sampleGray() {
       // Diff only inside the crop — see plan/calibration finding: motion outside the capture
       // window (bin walls, hands passing by) isn't a card arriving and shouldn't arm a capture.
-      const { sx, sy, sw, sh } = cropRectPx(this.video.videoWidth, this.video.videoHeight, this.crop);
-      this.diffCtx.drawImage(this.video, sx, sy, sw, sh, 0, 0, this.diffCanvas.width, this.diffCanvas.height);
-      const data = this.diffCtx.getImageData(0, 0, this.diffCanvas.width, this.diffCanvas.height).data;
-      const gray = new Uint8ClampedArray(this.diffCanvas.width * this.diffCanvas.height);
-      for (let i = 0, p = 0; i < data.length; i += 4, p++) {
-        gray[p] = (data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114) | 0;
-      }
-      return gray;
+      return sampleGray(this.video, this.crop, this.diffCtx);
     }
 
     _tick() {
@@ -408,6 +423,30 @@ window.CardSorterCapture = (function () {
 
         const drift = meanAbsDiff(gray, this.anchorGray);
         if (drift <= this.settings.confirmMaxDrift) {
+          // Settled — but settled on WHAT? The drift test proves the scene stopped moving, and an
+          // empty platform is the stillest thing there is. Measured on CFSortingRun2: 7 of 178
+          // scans fired 2.75-2.99s after the previous one against a 4.21s median, all scoring
+          // 0.54-0.56. Those were captures of bare platform taken in the gap after one card was
+          // ejected and before the next arrived.
+          //
+          // This is not merely noise in the manifest. The machine holds until it hears a tone, so
+          // a phantom capture tones on garbage and the ARRIVING card is then ejected unscanned and
+          // routed by a decision that was never about it. Every phantom costs one real card.
+          if (this.emptyBaseline) {
+            const presence = meanAbsDiff(gray, this.emptyBaseline);
+            if (presence <= this.settings.cardPresenceMinDiff) {
+              console.log('[capture] no card present: ' + presence.toFixed(2) + ' <= ' +
+                this.settings.cardPresenceMinDiff + ' from empty-platform baseline — waiting');
+              // Back to ARMED rather than looping in CHANGING: ARMED is the state that waits for
+              // a card to arrive, and it is the only one that runs the hopper-empty timeout. A
+              // genuinely empty hopper must still be able to end the run.
+              this._resetStable();
+              this._setState(S.ARMED);
+              this.lastActivityAt = Date.now();
+              this.onNoCard(presence);
+              return;
+            }
+          }
           this.confirmAttempts = 0;
           this._triggerCapture({ drift, spanMs });
           return;
@@ -486,8 +525,90 @@ window.CardSorterCapture = (function () {
     return sum / a.length;
   }
 
+  // ═══════════════════ EMPTY-PLATFORM BASELINE ═══════════════════
+  // 64x48 grays, base64'd so they fit a settings JSON row (~4KB) instead of a 12KB number array.
+
+  const DIFF_W = 64;
+  const DIFF_H = 48;
+
+  /**
+   * The one grayscale sampler. Both the rig and Calibrate go through this, deliberately: a
+   * baseline captured by even slightly different maths than the frames it is later compared
+   * against would produce a constant offset in every diff, which is exactly the kind of bug that
+   * shows up as "the threshold needs to be weirdly high on this rig" and never gets diagnosed.
+   */
+  function sampleGray(video, crop, ctx) {
+    const { sx, sy, sw, sh } = cropRectPx(video.videoWidth, video.videoHeight, crop);
+    ctx.drawImage(video, sx, sy, sw, sh, 0, 0, DIFF_W, DIFF_H);
+    const data = ctx.getImageData(0, 0, DIFF_W, DIFF_H).data;
+    const gray = new Uint8ClampedArray(DIFF_W * DIFF_H);
+    for (let i = 0, p = 0; i < data.length; i += 4, p++) {
+      gray[p] = (data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114) | 0;
+    }
+    return gray;
+  }
+
+  /** Scratch canvas for callers that have a <video> but no CaptureRig — i.e. Calibrate. */
+  let standaloneCtx = null;
+  function sampleGrayFromVideo(video, crop) {
+    if (!video || !video.videoWidth) return null;
+    if (!standaloneCtx) {
+      const c = document.createElement('canvas');
+      c.width = DIFF_W;
+      c.height = DIFF_H;
+      standaloneCtx = c.getContext('2d', { willReadFrequently: true });
+    }
+    return sampleGray(video, crop, standaloneCtx);
+  }
+
+  function encodeGray(gray) {
+    let s = '';
+    for (let i = 0; i < gray.length; i++) s += String.fromCharCode(gray[i]);
+    return btoa(s);
+  }
+
+  /**
+   * Decodes a stored baseline, but ONLY if it was taken under the crop now in force.
+   *
+   * The guard is the important half. A baseline is a picture of one specific region of the frame;
+   * move the capture window and it describes somewhere else entirely, so a stale baseline would
+   * silently start rejecting real cards as "empty platform". Returning null on mismatch degrades
+   * to the old behaviour (no presence check) rather than to a confidently wrong one.
+   */
+  function decodeBaseline(b64, crop, savedCrop) {
+    if (!b64 || !savedCrop) return null;
+    // Compare the fields getCrop() actually returns — {left, top, width, height}. There is no
+    // `vpos` on a crop object (that is the SETTING, not the geometry), and comparing it would be
+    // Math.abs(NaN) < eps, i.e. false forever, silently disabling the presence check.
+    const near = (a, b) => Number.isFinite(a) && Number.isFinite(b) && Math.abs(a - b) < 0.005;
+    if (!near(crop.width, savedCrop.width) || !near(crop.height, savedCrop.height) || !near(crop.top, savedCrop.top)) {
+      console.warn('[capture] empty-platform baseline was taken under a different crop — presence check disabled. Re-capture it in Calibrate.');
+      return null;
+    }
+    try {
+      const s = atob(b64);
+      // A real browser's atob() throws SyntaxError on malformed base64, but that is not the only
+      // way this string could be bad — a hand-edited settings row or a future format change would
+      // decode cleanly to the wrong length. meanAbsDiff() has no length check of its own (it just
+      // walks a.length), so a mismatched array would silently compare only part of the frame
+      // rather than erroring. Length is the one invariant worth asserting explicitly.
+      if (s.length !== DIFF_W * DIFF_H) {
+        console.warn('[capture] empty-platform baseline has the wrong length (' + s.length +
+          ', expected ' + (DIFF_W * DIFF_H) + ') — presence check disabled.');
+        return null;
+      }
+      const gray = new Uint8ClampedArray(s.length);
+      for (let i = 0; i < s.length; i++) gray[i] = s.charCodeAt(i);
+      return gray;
+    } catch (err) {
+      console.warn('[capture] could not decode empty-platform baseline:', err && err.message);
+      return null;
+    }
+  }
+
   return {
     api, getCrop, renderCropGuide, cropRectPx, canvasToBlobUnderCap, ThumbPreview, CaptureRig,
     describeFraming, VIDEO_CONSTRAINTS, CLIP_INPUT_PX, STATE: S, MAX_UPLOAD_BYTES,
+    sampleGrayFromVideo, encodeGray, decodeBaseline, meanAbsDiff,
   };
 })();

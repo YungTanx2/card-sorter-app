@@ -1,6 +1,7 @@
 {
   "minScore": 0.65,
   "minGap": 0.025,
+  "minCardScore": 0.6,
   "defaultThresholdCents": 50,
   "defaultCondition": "Near Mint",
   "captureIntervalMs": 200,
@@ -9,6 +10,9 @@
   "confirmMinSpanMs": 500,
   "confirmMaxDrift": 6,
   "confirmMaxAttempts": 5,
+  "emptyPlatformBaseline": null,
+  "emptyPlatformCrop": null,
+  "cardPresenceMinDiff": 10,
   "hopperEmptyTimeoutMs": 8000,
   "scanMaxRetries": 3,
   "scanRetryBackoffMs": 1000,
