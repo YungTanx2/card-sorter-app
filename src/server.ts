@@ -328,6 +328,26 @@ app.get('/api/goals/:id/missing', (req, res) => {
   res.json(getMissingList(req.params.id));
 });
 
+/**
+ * The goal's full variant-scoped candidate pool, for the labelling view's search box.
+ *
+ * Served whole rather than as a query-filtered endpoint: a scoped pool is ~220 cards, which is a
+ * single small response the client can filter instantly as you type. A search-as-you-type route
+ * would mean a round trip per keystroke to do work the browser can do for free.
+ *
+ * Deliberately the SAME pool (getCandidatesForSets with the goal's variant) that recognition
+ * scores against — labelling a frame as a card that isn't in the matcher's pool would create
+ * ground truth the matcher could never possibly satisfy.
+ */
+app.get('/api/goals/:id/candidates', (req, res) => {
+  const goal = requireGoal(req, res);
+  if (!goal) return;
+  const candidates = getCandidatesForSets(goal.setIds, goal.variant);
+  res.json(candidates.map((c) => ({
+    productId: c.productId, name: c.name, number: c.number, rarity: c.rarity, imageUrl: c.imageUrl,
+  })));
+});
+
 app.post('/api/goals/:id/adjust', (req, res) => {
   if (!requireGoal(req, res)) return;
   const productId = Number(req.body?.productId);
