@@ -118,6 +118,11 @@
   .candidate .cname { color: var(--text); font-weight: 600; margin-top: 0.25rem; display: block; }
   .candidate .cscore { font-family: monospace; }
 
+  input[type=text] {
+    width: 100%; background: var(--surface); border: 1px solid var(--border); color: var(--text);
+    border-radius: 8px; padding: 0.6rem 0.7rem; font-size: 1rem; margin-bottom: 0.6rem;
+  }
+
   .verdict-row { display: flex; gap: 0.5rem; margin-top: 0.9rem; }
   .verdict-row button { flex: 1; }
 
@@ -159,7 +164,10 @@
   <!-- ══════════════════════ QUEUE ══════════════════════ -->
   <section id="view-queue" hidden>
     <div class="queue-bar">
-      <span><strong id="queue-labelled-count">0</strong> / <span id="queue-total-count">0</span> labelled</span>
+      <span>
+        <strong id="queue-labelled-count">0</strong> / <span id="queue-total-count">0</span> labelled
+        <span id="queue-position"></span>
+      </span>
       <button class="secondary" id="queue-back-btn">← Sessions</button>
     </div>
     <div class="filter-row">
@@ -187,9 +195,14 @@
         <button class="confirm" id="confirm-top-btn" style="width:100%;"></button>
       </div>
 
-      <div class="candidates-heading">Top matches — click the right one, or use the buttons below</div>
+      <div class="candidates-heading">Top matches — click the right one, or search below</div>
       <div id="candidates-loading" class="loading" hidden>Scoring against the catalog…</div>
       <div class="candidate-grid" id="candidate-grid"></div>
+
+      <div class="candidates-heading">Not up there? Search the whole set by name or number</div>
+      <input type="text" id="search-input" placeholder="e.g. Robin Hood, or 159" autocomplete="off" />
+      <div class="candidate-grid" id="search-grid"></div>
+      <div id="search-hint" class="hint"></div>
 
       <div class="verdict-row">
         <button class="secondary" id="not-a-card-btn">Not a card</button>
@@ -233,6 +246,9 @@
   let queue = [];          // filtered+sorted view of `samples`
   let queueIndex = 0;
   let currentCandidates = null; // cached top-K for the sample currently on screen
+  // The goal's whole variant-scoped pool (~220 cards), fetched once per goal so the search box
+  // can filter locally as you type instead of round-tripping per keystroke.
+  let goalCandidates = [];
 
   // ── GOALS ────────────────────────────────────────────────────────────────
   async function loadGoals() {
@@ -244,8 +260,11 @@
     $('goals-empty').hidden = goals.length > 0;
     goals.forEach((g) => {
       const li = document.createElement('li');
-      li.innerHTML = '<div class="pick-name">' + g.name + '</div>' +
-        '<div class="pick-meta">' + g.gameName + ' · ' + g.variant + '</div>';
+      // textContent for the name: goal names are operator-entered free text, so interpolating
+      // them into innerHTML would execute whatever markup a name happened to contain.
+      li.innerHTML = '<div class="pick-name"></div><div class="pick-meta"></div>';
+      li.querySelector('.pick-name').textContent = g.name;
+      li.querySelector('.pick-meta').textContent = g.gameName + ' · ' + g.variant;
       li.addEventListener('click', () => openGoal(g));
       list.appendChild(li);
     });
@@ -260,6 +279,14 @@
       const res = await api('/api/goals/' + goal.id);
       sessions = res.sessions || [];
     } catch (err) { showError(err); return; }
+
+    // Non-fatal: without it the search box is empty, but the top-8 flow still works fully.
+    try {
+      goalCandidates = await api('/api/goals/' + goal.id + '/candidates');
+    } catch (err) {
+      goalCandidates = [];
+      console.warn('[labels] could not load the candidate pool for search:', err && err.message);
+    }
 
     const list = $('sessions-list');
     list.innerHTML = '';
@@ -341,6 +368,9 @@
   function renderCounts() {
     $('queue-total-count').textContent = samples.length;
     $('queue-labelled-count').textContent = samples.filter(isLabelled).length;
+    $('queue-position').textContent = queue.length
+      ? ' · showing ' + (queueIndex + 1) + ' of ' + queue.length + ' in this filter'
+      : '';
   }
 
   // ── CURRENT SAMPLE ───────────────────────────────────────────────────────
@@ -384,6 +414,10 @@
     }
 
     currentCandidates = null;
+    // Reset the search per sample: a stale query left over from the previous frame would show
+    // results that look like suggestions for THIS one, which is exactly how a mislabel happens.
+    $('search-input').value = '';
+    renderSearch();
     await loadCandidates(s);
   }
 
@@ -401,10 +435,14 @@
       res.candidates.forEach((c) => {
         const div = document.createElement('div');
         div.className = 'candidate' + (c.productId === s.productId ? ' is-top' : '');
-        div.innerHTML =
-          '<img src="' + (c.imageUrl || '') + '" alt="' + (c.name || '') + '" loading="lazy" />' +
-          '<span class="cname">' + (c.name || '?') + '</span>' +
-          '<div class="cscore">' + c.score.toFixed(3) + '</div>';
+        // Same reasoning as the search grid: 30 card names in this set alone contain "&"
+        // (e.g. "Lilo & Stitch - Fun-Loving Friends"), which has no business going through
+        // innerHTML — and one containing a quote would break out of the alt attribute.
+        div.innerHTML = '<img loading="lazy" alt="" /><span class="cname"></span><div class="cscore"></div>';
+        div.querySelector('img').src = c.imageUrl || '';
+        div.querySelector('img').alt = c.name || '';
+        div.querySelector('.cname').textContent = c.name || '?';
+        div.querySelector('.cscore').textContent = c.score.toFixed(3);
         div.addEventListener('click', () => submitLabel(s, 'card', c.productId));
         grid.appendChild(div);
       });
@@ -425,28 +463,85 @@
     } catch (err) { showError(err); return; }
     s.labelVerdict = verdict;
     s.labelProductId = productId ?? null;
-    advance();
+    afterLabel();
   }
+
+  // ── SEARCH (for when the right card isn't in the top 8) ──────────────────
+  const MAX_SEARCH_RESULTS = 12;
+
+  function renderSearch() {
+    const q = $('search-input').value.trim().toLowerCase();
+    const grid = $('search-grid');
+    const hint = $('search-hint');
+    grid.innerHTML = '';
+    if (!q) {
+      hint.textContent = goalCandidates.length
+        ? goalCandidates.length + ' cards in this goal’s pool.'
+        : 'Candidate pool unavailable — reopen the goal to retry.';
+      return;
+    }
+    // Match name OR card number, so "159" finds 159/207 without typing the whole thing.
+    const hits = goalCandidates.filter((c) =>
+      (c.name || '').toLowerCase().includes(q) || (c.number || '').toLowerCase().includes(q));
+    hint.textContent = hits.length === 0 ? 'No matches in this goal’s pool.'
+      : hits.length > MAX_SEARCH_RESULTS
+        ? 'Showing ' + MAX_SEARCH_RESULTS + ' of ' + hits.length + ' matches — keep typing to narrow.'
+        : hits.length + ' match' + (hits.length === 1 ? '' : 'es') + '.';
+
+    const s = currentSample();
+    hits.slice(0, MAX_SEARCH_RESULTS).forEach((c) => {
+      const div = document.createElement('div');
+      div.className = 'candidate';
+      div.innerHTML = '<img loading="lazy" alt="" /><span class="cname"></span><div class="cscore"></div>';
+      // textContent, not innerHTML — card names carry apostrophes and & (e.g. "Aladdin & Genie"),
+      // which would break out of the markup above if interpolated.
+      div.querySelector('img').src = c.imageUrl || '';
+      div.querySelector('.cname').textContent = c.name || '?';
+      div.querySelector('.cscore').textContent = c.number || '';
+      div.addEventListener('click', () => { if (s) submitLabel(s, 'card', c.productId); });
+      grid.appendChild(div);
+    });
+  }
+
+  $('search-input').addEventListener('input', renderSearch);
 
   $('not-a-card-btn').addEventListener('click', () => { const s = currentSample(); if (s) submitLabel(s, 'not-a-card', null); });
   $('not-in-set-btn').addEventListener('click', () => { const s = currentSample(); if (s) submitLabel(s, 'not-in-set', null); });
-  $('skip-btn').addEventListener('click', () => advance());
+  $('skip-btn').addEventListener('click', () => skip());
   $('prev-btn').addEventListener('click', () => {
     if (queueIndex > 0) { queueIndex--; renderCurrent(); }
   });
 
   /**
-   * Moves to the next item. Deliberately re-derives the queue rather than just incrementing —
-   * under the 'unlabelled' filter (the default), the item just labelled needs to DISAPPEAR from
-   * the list rather than leaving a gap, or the counter and the visible queue drift apart.
+   * Called after a label is recorded. Under the 'unlabelled' filter the item must LEAVE the
+   * queue; splicing it out in place (rather than rebuilding) keeps queueIndex pointing at the
+   * item that shifts up into its slot, so labelling walks forward naturally.
+   *
+   * Rebuilding here instead was the original bug: rebuildQueue() resets queueIndex to 0, which is
+   * harmless for a label (the labelled item is gone, so index 0 IS the next one) but broke skip,
+   * which shares no code with this any more precisely because the two need opposite behaviour.
    */
-  function advance() {
-    renderCounts();
+  function afterLabel() {
     if (filter === 'unlabelled') {
-      rebuildQueue(); // labelled item drops out; queueIndex resets to 0, i.e. the new front
-      return;
+      queue.splice(queueIndex, 1);
+      if (queueIndex >= queue.length) queueIndex = Math.max(0, queue.length - 1);
+    } else if (queueIndex < queue.length - 1) {
+      queueIndex++;
     }
-    if (queueIndex < queue.length - 1) queueIndex++;
+    renderCounts();
+    renderCurrent();
+  }
+
+  /**
+   * Skip: move past this item WITHOUT labelling it, so it stays in the queue for a later pass.
+   * Wraps at the end rather than dead-ending — with items deliberately left unlabelled, the
+   * useful behaviour is to cycle back round to them, and the position readout in the queue bar
+   * makes the wrap visible rather than confusing.
+   */
+  function skip() {
+    if (queue.length === 0) return;
+    queueIndex = (queueIndex + 1) % queue.length;
+    renderCounts();
     renderCurrent();
   }
 
