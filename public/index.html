@@ -232,6 +232,21 @@
     </div>
     <div id="calib-status" class="hint"></div>
 
+    <h2 style="margin-top:1.5rem;">Empty platform</h2>
+    <p class="hint">
+      The capture gate proves the scene stopped <em>moving</em> — and bare platform is the stillest
+      thing there is, so without a reference for "nothing there" a capture can fire into the gap
+      between one card leaving and the next arriving. That costs a real card: the machine holds
+      until it hears a tone, so a phantom capture tones on nothing and the <em>arriving</em> card is
+      ejected unscanned. Clear the platform, press Capture, then put a card in and watch the number
+      jump. Anything at or below the threshold is treated as no card.
+    </p>
+    <div class="row" style="margin-top:0.5rem;">
+      <button class="secondary" id="calib-baseline-btn" style="margin-top:0;">Capture empty platform</button>
+      <button class="secondary" id="calib-baseline-clear-btn" style="margin-top:0;">Clear</button>
+    </div>
+    <pre id="calib-presence" class="hint" style="white-space:pre-wrap; word-break:break-word;">Start the camera to measure.</pre>
+
     <h2 style="margin-top:1.5rem;">Pixels reaching recognition</h2>
     <p class="hint">
       The model resizes whatever it gets so its <strong>shortest edge</strong> is 224px, then
@@ -374,7 +389,8 @@
   // Camera stack (crop geometry, frame-diff trigger, adaptive-quality capture, thumbnail
   // preview) lives in capture.js, shared with the Set Builder page — see the comment at the top
   // of that file for why it isn't duplicated.
-  const { api, getCrop, renderCropGuide, ThumbPreview, CaptureRig, describeFraming, VIDEO_CONSTRAINTS } = window.CardSorterCapture;
+  const { api, getCrop, renderCropGuide, ThumbPreview, CaptureRig, describeFraming, VIDEO_CONSTRAINTS,
+    sampleGrayFromVideo, encodeGray, decodeBaseline, meanAbsDiff } = window.CardSorterCapture;
   const audio = window.CardSorterAudio;
 
   // ── tiny router ──────────────────────────────────────────────
@@ -383,7 +399,7 @@
   function showView(name) {
     // Calibrate is the only view holding a camera stream that isn't the active run — release
     // it on the way out rather than leaving a hidden tab pinning the camera in the background.
-    if (currentViewName === 'calibrate' && name !== 'calibrate') stopCalibCamera();
+    if (currentViewName === 'calibrate' && name !== 'calibrate') { stopCalibCamera(); stopPresenceLoop(); }
     currentViewName = name;
     views.forEach((v) => {
       const el = document.getElementById('view-' + v);
@@ -582,18 +598,94 @@
     renderCropGuide($('calib-crop-guide'), getCrop({ captureCropZoomPct: zoom, captureCropVPosPct: vpos }));
   }
 
-  $('crop-size-slider').addEventListener('input', () => { updateCalibPreview(); renderFraming(); });
-  $('crop-vpos-slider').addEventListener('input', () => { updateCalibPreview(); renderFraming(); });
-  $('calib-stop-btn').addEventListener('click', stopCalibCamera);
+  // ── empty-platform baseline ──────────────────────────────────────────────
+  // Held locally until Save, so a mis-aimed capture can be redone without having written it.
+  let pendingBaseline = null;   // { baseline, crop } from this session's Capture press
+  let calibPresenceTimer = null;
+
+  function calibCrop() {
+    return getCrop({
+      captureCropZoomPct: Number($('crop-size-slider').value),
+      captureCropVPosPct: Number($('crop-vpos-slider').value),
+    });
+  }
+
+  /** The stored baseline, but only if it still describes the crop the sliders are showing. */
+  function activeBaseline() {
+    const crop = calibCrop();
+    if (pendingBaseline) return decodeBaseline(pendingBaseline.baseline, crop, pendingBaseline.crop);
+    return decodeBaseline(appSettings.emptyPlatformBaseline, crop, appSettings.emptyPlatformCrop);
+  }
+
+  function renderPresence() {
+    const v = $('calib-camera');
+    if (!v.videoWidth) { $('calib-presence').textContent = 'Start the camera to measure.'; return; }
+    const base = activeBaseline();
+    const threshold = appSettings.cardPresenceMinDiff ?? 10;
+    if (!base) {
+      $('calib-presence').textContent = [
+        'baseline   none for this crop - presence check is OFF',
+        'threshold  ' + threshold,
+        '',
+        'Clear the platform and press Capture empty platform.',
+      ].join(String.fromCharCode(10));
+      return;
+    }
+    const gray = sampleGrayFromVideo(v, calibCrop());
+    const diff = meanAbsDiff(gray, base);
+    $('calib-presence').textContent = [
+      'baseline   stored' + (pendingBaseline ? ' (unsaved - press Save crop)' : ''),
+      'threshold  ' + threshold,
+      'now        ' + diff.toFixed(2),
+      'verdict    ' + (diff <= threshold ? 'NO CARD - a capture here would be suppressed'
+        : 'card present - would capture'),
+    ].join(String.fromCharCode(10));
+  }
+
+  function startPresenceLoop() {
+    if (calibPresenceTimer) return;
+    calibPresenceTimer = setInterval(renderPresence, 300);
+  }
+  function stopPresenceLoop() {
+    if (calibPresenceTimer) { clearInterval(calibPresenceTimer); calibPresenceTimer = null; }
+  }
+
+  $('calib-baseline-btn').addEventListener('click', () => {
+    const v = $('calib-camera');
+    if (!v.videoWidth) { $('calib-status').textContent = 'Start the camera first.'; return; }
+    const gray = sampleGrayFromVideo(v, calibCrop());
+    pendingBaseline = { baseline: encodeGray(gray), crop: calibCrop() };
+    $('calib-status').textContent = 'Empty platform captured — press Save crop to keep it.';
+    renderPresence();
+  });
+
+  $('calib-baseline-clear-btn').addEventListener('click', () => {
+    pendingBaseline = { baseline: null, crop: null };
+    $('calib-status').textContent = 'Baseline cleared — press Save crop to apply. The presence check will be off.';
+    renderPresence();
+  });
+
+  $('crop-size-slider').addEventListener('input', () => { updateCalibPreview(); renderFraming(); renderPresence(); });
+  $('crop-vpos-slider').addEventListener('input', () => { updateCalibPreview(); renderFraming(); renderPresence(); });
+  $('calib-stop-btn').addEventListener('click', () => { stopCalibCamera(); stopPresenceLoop(); });
 
   $('calib-save-btn').addEventListener('click', async () => {
     const patch = {
       captureCropZoomPct: Number($('crop-size-slider').value),
       captureCropVPosPct: Number($('crop-vpos-slider').value),
     };
+    // Only touch the baseline keys if this visit actually changed them — otherwise saving a crop
+    // tweak would silently wipe a baseline the operator captured on a previous visit.
+    if (pendingBaseline) {
+      patch.emptyPlatformBaseline = pendingBaseline.baseline;
+      patch.emptyPlatformCrop = pendingBaseline.crop;
+    }
     try {
       applySettings(await api('/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch) }));
-      $('calib-status').textContent = 'Saved — every capture will use this crop from now on.';
+      pendingBaseline = null;
+      $('calib-status').textContent = 'Saved — every capture will use this crop from now on.'
+        + (appSettings.emptyPlatformBaseline ? ' Presence check is on.' : ' Presence check is off (no baseline).');
+      renderPresence();
     } catch (err) {
       $('calib-status').textContent = 'Error: ' + err.message;
     }
@@ -602,8 +694,10 @@
   document.querySelector('[data-view="calibrate"]').addEventListener('click', () => {
     $('crop-size-slider').value = appSettings.captureCropZoomPct;
     $('crop-vpos-slider').value = appSettings.captureCropVPosPct;
+    pendingBaseline = null;
     updateCalibPreview();
     startCalibCamera();
+    startPresenceLoop();
   });
 
   // ═══════════════════════ RUN ══════════════════════════════════
@@ -663,6 +757,7 @@
       settings: appSettings,
       onHopperEmpty: () => finishRun(true),
       onStall: (reason) => showStall(reason),
+      onNoCard: (diff) => setBanner('armed', 'WAITING — no card on platform (' + diff.toFixed(1) + ')'),
       onCapture: (blob, meta) => {
         setBanner('scanning', 'SCANNING…');
         lastCaptureMeta = meta;

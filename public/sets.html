@@ -776,6 +776,7 @@
       settings: appSettings,
       onHopperEmpty: () => finishRun('hopper-empty'),
       onStall: (reason) => showStall(reason),
+      onNoCard: (diff) => setBanner('armed', 'WAITING — no card on platform (' + diff.toFixed(1) + ')'),
       collectSamples,
       onCapture: (blob, meta) => {
         setBanner('scanning', 'SCANNING…');

@@ -458,6 +458,15 @@ export async function scanGoalCard(goalSessionId: string, imageBuffer: Buffer): 
     };
   };
 
+  // 0. Server-side backstop for phantom captures — see AppSettings.minCardScore's doc and
+  //    session.ts's identical check. Ahead of the confidence gate for the same reason: "did
+  //    anything here resemble a card" is a different question from "which card, confidently".
+  //    Never changes the outcome (still 'extra', count unaffected) — only the reason label.
+  if (top && top.score < settings.minCardScore) {
+    const guess = candidates.find((c) => c.productId === top!.productId) ?? null;
+    return record('extra', 'not-a-card', guess, top.score, false);
+  }
+
   // 1. Unrecognized or ambiguous. Deliberately checked before anything else — we know nothing
   //    about this card, so no rarity or slot reasoning is valid. No count changes, so the goal
   //    still reports the real card missing and a re-run gets another shot at it.

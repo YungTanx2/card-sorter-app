@@ -3,6 +3,7 @@ import { db } from './db';
 import { StallError } from './errors';
 import { getProductCached } from './tcgtracking';
 import { matchCard, prewarmEmbeddings } from './embeddings';
+import { getSettings } from './settings';
 import { fetchSets, getCandidatesForSets, getPricesForProduct, prewarmSet } from './tcgcsv';
 import { BulkBox, CardRecord, Decision, DecisionReason, Session, SessionConfig, SessionStatus, TCGCSVPrice } from './types';
 
@@ -233,8 +234,17 @@ export async function scanCard(sessionId: string, imageBuffer: Buffer): Promise<
     return recordBulk('low-confidence', null, null, null, null, null);
   }
 
-  const confident = top.score >= session.minScore && (!runnerUp || top.score - runnerUp.score >= session.minGap);
   const name = candidates.find((c) => c.productId === top!.productId)?.name ?? null;
+
+  // Server-side backstop for phantom captures — see AppSettings.minCardScore's doc. Checked
+  // BEFORE the confidence gate, not folded into it: this is "did anything here resemble a card
+  // at all", a different question from "which card, confidently". Never changes routing (both
+  // reasons hit the same recordBulk path) — it only makes the manifest tell the two apart.
+  if (top.score < getSettings().minCardScore) {
+    return recordBulk('not-a-card', top.productId, name, top.score, null, null);
+  }
+
+  const confident = top.score >= session.minScore && (!runnerUp || top.score - runnerUp.score >= session.minGap);
 
   if (!confident) {
     // Log the best guess anyway — this is what makes the bulk pile searchable per plan

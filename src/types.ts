@@ -11,7 +11,15 @@ export type Decision = 'keeper' | 'bulk';
  * wasn't sure) and from a hard scan failure — this is what makes the bulk
  * pile searchable/auditable rather than just a black box.
  */
-export type DecisionReason = 'above-threshold' | 'below-threshold' | 'low-confidence' | 'scan-error';
+/**
+ * 'not-a-card' is distinct from 'low-confidence': low-confidence means "recognized something,
+ * couldn't pick between candidates"; not-a-card means "didn't even clear the floor for THIS being
+ * a card at all". The client-side presence check (capture.js) is the real fix for phantom
+ * captures of bare platform — this is a backstop for whatever gets past it (a stray object, a
+ * hand in frame, a rig whose baseline is stale). Kept as its own reason rather than folded into
+ * low-confidence so the manifest can tell the two apart.
+ */
+export type DecisionReason = 'above-threshold' | 'below-threshold' | 'low-confidence' | 'not-a-card' | 'scan-error';
 
 export type SessionStatus = 'active' | 'stalled' | 'complete';
 
@@ -167,7 +175,8 @@ export type GoalOutcome = 'needed' | 'extra';
  * know what it was. A low-confidence card leaves the goal still reporting that slot missing,
  * which is what makes the failure self-healing — you'll re-run the pile and get another shot.
  */
-export type GoalReason = 'fills-slot' | 'slot-filled' | 'excluded-rarity' | 'not-a-set-slot' | 'low-confidence';
+/** 'not-a-card' — see DecisionReason's doc; same distinction, same reasoning, applies here too. */
+export type GoalReason = 'fills-slot' | 'slot-filled' | 'excluded-rarity' | 'not-a-set-slot' | 'low-confidence' | 'not-a-card';
 
 export type GoalStatus = 'active' | 'complete';
 
@@ -270,6 +279,26 @@ export interface AppSettings {
    *  n=6 from one set — a real dry run should retune these, not just trust the starting point. */
   minScore: number;
   minGap: number;
+  /**
+   * Server-side backstop for phantom captures — see DecisionReason's 'not-a-card' doc. The
+   * client-side presence check in capture.js is the real fix (it prevents the capture, and
+   * therefore the tone, entirely); this only relabels whatever slips past it — a session with no
+   * baseline configured, or a baseline made stale by a crop change. Deliberately NOT
+   * session/goal-scoped like minScore/minGap: it is a floor beneath "is this even a card", not a
+   * per-run recognition tuning knob.
+   *
+   * IMPORTANT: this reason never changes ROUTING. recordBulk()/record() always send the card to
+   * bulk/extras regardless of which DecisionReason is attached — 'not-a-card' vs 'low-confidence'
+   * is purely a manifest label for diagnosis. That is what makes 0.60 an acceptable choice despite
+   * one known false-positive case: CFSortingRun2 had 7 phantom captures scored 0.54-0.56 (cleanly
+   * separated from the run's real distribution, whose p10 was 0.715), but sample 53 in that same
+   * run was a genuine Location card — whose reference art is landscape while the machine feeds it
+   * portrait (see [[project_tcg-card-sorter]] "Fix Location cards") — scored 0.5717, just under
+   * this floor. Until that orientation bug is fixed, Location cards will be labelled
+   * 'not-a-card' instead of 'low-confidence' in the manifest; they still land in the correct pile
+   * either way. Revisit this value once Location scores recover.
+   */
+  minCardScore: number;
   defaultThresholdCents: number;
   defaultCondition: string;
   captureIntervalMs: number;
@@ -288,6 +317,30 @@ export interface AppSettings {
   confirmMinSpanMs: number;   // minimum anchor age before confirming; below this we wait
   confirmMaxDrift: number;    // mean abs gray diff vs anchor still considered "at rest"
   confirmMaxAttempts: number; // failed confirmations before stalling as 'unsettled'
+  /**
+   * Card-presence gate (public/capture.js). The confirmation gate above proves the scene stopped
+   * MOVING; this proves something is actually there. An empty platform is perfectly still, so
+   * without this a capture fires into the gap between one card leaving and the next arriving.
+   *
+   * Measured on CFSortingRun2: 7 of 178 scans fired 2.75-2.99s after the previous one against a
+   * 4.21s median, all scoring 0.54-0.56. Because the machine holds until it hears a tone, each of
+   * those toned on nothing and the arriving card was then ejected unscanned.
+   *
+   * A NOTE ON WHY THERE IS NO SERVER-SIDE SCORE FLOOR to back this up: it looked obvious (the
+   * phantom scores sat in a clean 0.54-0.56 band) until a real Location card — Ring of Stones,
+   * capture sample 53 — was measured at 0.5717. Real cards and phantoms overlap on score, so any
+   * floor that catches the phantoms also rejects legitimate cards. The client-side check is not a
+   * convenience here; it is the only place the two are separable.
+   *
+   * emptyPlatformBaseline is a base64 64x48 grayscale sample of the bare platform, captured in
+   * Calibrate. emptyPlatformCrop records the crop it was taken under — a baseline describes one
+   * region of the frame, so it is discarded rather than trusted if the capture window has moved.
+   */
+  emptyPlatformBaseline: string | null;
+  /** The crop geometry as getCrop() returns it — NOT the vpos setting. */
+  emptyPlatformCrop: { left: number; top: number; width: number; height: number } | null;
+  /** Mean abs grayscale difference from the baseline below which we call it "no card". */
+  cardPresenceMinDiff: number;
   hopperEmptyTimeoutMs: number;
   scanMaxRetries: number;
   scanRetryBackoffMs: number;
