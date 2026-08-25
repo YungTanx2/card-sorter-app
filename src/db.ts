@@ -78,6 +78,19 @@ db.exec(`
     PRIMARY KEY (product_id, model_id, variant)
   );
 
+  -- Whether a candidate's TCGCSV reference art is landscape, so embeddings.ts knows if it needs
+  -- rotated variants (see embedding_cache's comment) WITHOUT re-downloading the image to look.
+  --
+  -- This exists purely to make the rotation backfill idempotent and cheap. Without it, the
+  -- "does this product need rotations?" check has to fetch the image every time, which turns
+  -- every session/goal creation into a re-download of the whole set's reference art — ~261
+  -- images for one Lorcana set, on every single run, forever. With it, that cost is paid once.
+  CREATE TABLE IF NOT EXISTS reference_meta (
+    product_id   INTEGER PRIMARY KEY,
+    is_landscape INTEGER NOT NULL,
+    checked_at   INTEGER NOT NULL
+  );
+
   CREATE TABLE IF NOT EXISTS sessions (
     id                 TEXT PRIMARY KEY,
     game_id            INTEGER NOT NULL,
