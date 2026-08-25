@@ -3,12 +3,13 @@ import sharp from 'sharp';
 import { db } from './db';
 import { StallError } from './errors';
 import { matchCard, prewarmEmbeddings } from './embeddings';
+import { readCardTitle, fuseSignals, OcrTitleMatch } from './ocr';
 import { getSettings } from './settings';
 import { fetchSets, getCandidatesForSets, prewarmSet, fetchSetCandidates } from './tcgcsv';
 import { assignSlots, parseCardNumber, compareCardNumbers } from './ordering';
 import {
   CandidateCard, Goal, GoalCard, GoalConfig, GoalOutcome, GoalReason, GoalSession, GoalSlot,
-  SessionStatus,
+  MatchSource, SessionStatus,
 } from './types';
 
 /**
@@ -326,10 +327,10 @@ export function completeGoalSession(id: string): GoalSession {
 const insertGoalCard = db.prepare(`
   INSERT INTO goal_cards (goal_session_id, goal_id, seq, product_id, name, number, score,
     runner_up_score, runner_up_product_id, runner_up_name, outcome, reason, voided,
-    counts_toward_goal, thumb_jpeg, scanned_at)
+    counts_toward_goal, thumb_jpeg, scanned_at, match_source, ocr_sim, ocr_raw)
   VALUES (@goalSessionId, @goalId, @seq, @productId, @name, @number, @score,
     @runnerUpScore, @runnerUpProductId, @runnerUpName, @outcome, @reason, 0,
-    @countsTowardGoal, @thumbJpeg, @scannedAt)
+    @countsTowardGoal, @thumbJpeg, @scannedAt, @matchSource, @ocrSim, @ocrRaw)
 `);
 const nextGoalSeq = db.prepare('SELECT COALESCE(MAX(seq), 0) + 1 AS n FROM goal_cards WHERE goal_session_id = ?');
 const selectGoalCard = db.prepare('SELECT * FROM goal_cards WHERE id = ?');
@@ -342,6 +343,7 @@ interface GoalCardRow {
   runner_up_product_id: number | null; runner_up_name: string | null;
   outcome: GoalOutcome; reason: GoalReason; voided: number; counts_toward_goal: number;
   thumb_jpeg: Buffer | null; scanned_at: number;
+  match_source: MatchSource | null; ocr_sim: number | null; ocr_raw: string | null;
 }
 
 function toGoalCard(row: GoalCardRow): GoalCard {
@@ -351,6 +353,7 @@ function toGoalCard(row: GoalCardRow): GoalCard {
     runnerUpScore: row.runner_up_score,
     runnerUpProductId: row.runner_up_product_id, runnerUpName: row.runner_up_name,
     outcome: row.outcome, reason: row.reason,
+    matchSource: row.match_source, ocrSim: row.ocr_sim, ocrRaw: row.ocr_raw,
     voided: row.voided === 1, countsTowardGoal: row.counts_toward_goal === 1,
     hasThumb: row.thumb_jpeg != null, scannedAt: row.scanned_at,
   };
@@ -406,21 +409,33 @@ export async function scanGoalCard(goalSessionId: string, imageBuffer: Buffer): 
   const goal = getGoal(session.goalId);
   if (!goal) throw new Error(`Goal ${session.goalId} not found`);
 
+  const settings = getSettings();
   let top, runnerUp, candidates: CandidateCard[];
+  let ocr: OcrTitleMatch | null = null;
   try {
     // Scoped to the goal's printing — a goal is already single-variant by construction, so a
     // product with no price in that printing is not a card this goal can ever want (tcgcsv.ts).
+    // The SAME scoped list feeds OCR, which is what makes a title read sufficient on its own:
+    // titles collide only in the unscoped catalog (see ocr.ts).
     candidates = getCandidatesForSets(goal.setIds, goal.variant);
-    const match = await matchCard(imageBuffer, candidates);
+    // Run both signals concurrently. They are independent, and OCR (~250ms) is the slower of the
+    // two, so serialising them would add its full cost to every scan for no reason. Recognition
+    // still sits far inside the 4.2s machine cycle.
+    const [match, ocrResult] = await Promise.all([
+      matchCard(imageBuffer, candidates),
+      settings.ocrEnabled
+        ? readCardTitle(imageBuffer, candidates, { minTitleChars: settings.ocrMinTitleChars })
+        : Promise.resolve(null),
+    ]);
     top = match.top;
     runnerUp = match.runnerUp;
+    ocr = ocrResult;
   } catch (err) {
     updateGoalSessionStatus.run('stalled', Date.now(), goalSessionId);
     throw new StallError(err instanceof Error ? err.message : 'recognition failed');
   }
   if (session.status === 'stalled') updateGoalSessionStatus.run('active', Date.now(), goalSessionId);
 
-  const settings = getSettings();
   const seq = (nextGoalSeq.get(goalSessionId) as { n: number }).n;
   const scannedAt = Date.now();
   const countsTowardGoal = session.dryRun ? 0 : 1;
@@ -432,7 +447,7 @@ export async function scanGoalCard(goalSessionId: string, imageBuffer: Buffer): 
 
   const record = async (
     outcome: GoalOutcome, reason: GoalReason, candidate: CandidateCard | null,
-    score: number | null, withThumb: boolean,
+    score: number | null, withThumb: boolean, matchSource: MatchSource | null = null,
   ): Promise<ScanGoalCardResult> => {
     const info = insertGoalCard.run({
       goalSessionId, goalId: goal.id, seq,
@@ -440,6 +455,10 @@ export async function scanGoalCard(goalSessionId: string, imageBuffer: Buffer): 
       number: candidate?.number ?? null, score, runnerUpScore: runnerUp?.score ?? null,
       runnerUpProductId, runnerUpName,
       outcome, reason, countsTowardGoal,
+      matchSource,
+      // Stamped on EVERY row, not just OCR-decided ones — the whole value of a peer signal is
+      // being able to ask afterwards what the other one saw.
+      ocrSim: ocr?.sim ?? null, ocrRaw: ocr?.raw ?? null,
       thumbJpeg: withThumb ? await makeThumb(imageBuffer) : null,
       scannedAt,
     });
@@ -460,51 +479,75 @@ export async function scanGoalCard(goalSessionId: string, imageBuffer: Buffer): 
     };
   };
 
+  // The peer decision. Both signals are computed above; fuseSignals decides whether either,
+  // both, or neither is confident, and flags the case where they disagree. See ocr.ts.
+  const fused = fuseSignals({
+    top, runnerUp, ocr,
+    minScore: settings.minScore, minGap: settings.minGap, ocrMinSim: settings.ocrMinSim,
+  });
+
   // 0. Server-side backstop for phantom captures — see AppSettings.minCardScore's doc and
   //    session.ts's identical check. Ahead of the confidence gate for the same reason: "did
   //    anything here resemble a card" is a different question from "which card, confidently".
   //    Never changes the outcome (still 'extra', count unaffected) — only the reason label.
-  if (top && top.score < settings.minCardScore) {
+  //
+  //    A confident OCR read vetoes this. ocr.ts only produces a read when it found a card-shaped
+  //    region AND matched a real catalog title, which is stronger evidence of "a card is present"
+  //    than a low cosine is of its absence. This is what rescues Location cards, whose landscape
+  //    reference art scores ~0.57 and was being labelled 'not-a-card' outright.
+  if (top && top.score < settings.minCardScore && !fused.ocrConfident) {
     const guess = candidates.find((c) => c.productId === top!.productId) ?? null;
     return record('extra', 'not-a-card', guess, top.score, false);
   }
 
-  // 1. Unrecognized or ambiguous. Deliberately checked before anything else — we know nothing
-  //    about this card, so no rarity or slot reasoning is valid. No count changes, so the goal
-  //    still reports the real card missing and a re-run gets another shot at it.
-  const confident = !!top
-    && top.score >= settings.minScore
-    && (!runnerUp || top.score - runnerUp.score >= settings.minGap);
-  if (!top || !confident) {
+  // 1a. Both signals confident, different cards. Fails safe rather than picking a winner — see
+  //     FusedMatch.conflict for why this is surfaced instead of resolved.
+  if (fused.conflict) {
+    const clipGuess = candidates.find((c) => c.productId === top!.productId) ?? null;
+    console.warn(
+      `[goals] signal conflict on seq ${seq}: embedding says ${top!.productId} (${clipGuess?.name ?? '?'}) `
+      + `@ ${top!.score.toFixed(4)}, OCR says ${ocr!.productId} @ sim ${ocr!.sim.toFixed(3)} from "${ocr!.raw}"`,
+    );
+    return record('extra', 'signal-conflict', clipGuess, top!.score, false);
+  }
+
+  // 1b. Neither signal was confident. Deliberately checked before anything else — we know nothing
+  //     about this card, so no rarity or slot reasoning is valid. No count changes, so the goal
+  //     still reports the real card missing and a re-run gets another shot at it.
+  if (fused.productId == null) {
     // Log the best guess anyway so the run's manifest is diagnosable, but never act on it.
     const guess = top ? candidates.find((c) => c.productId === top!.productId) ?? null : null;
     return record('extra', 'low-confidence', guess, top?.score ?? null, false);
   }
 
-  const candidate = candidates.find((c) => c.productId === top!.productId) ?? null;
+  const identifiedId = fused.productId;
+  const candidate = candidates.find((c) => c.productId === identifiedId) ?? null;
+  // Score reported for the row is still the embedding's, which is null-able now that OCR can
+  // carry a card on its own — a row with a match_source of 'ocr' and a low score is not a bug.
+  const matchScore = top?.score ?? null;
 
   // 2. Matched something that isn't a set slot at all — a puzzle insert or similar filler that
   //    TCGPlayer lists alongside the real cards. Its own reason rather than being folded into
   //    'excluded-rarity', so a run's manifest stays honest about why a card was passed over.
   if (!candidate || !isSetSlotCandidate(candidate)) {
-    return record('extra', 'not-a-set-slot', candidate, top.score, false);
+    return record('extra', 'not-a-set-slot', candidate, matchScore, false, fused.source);
   }
 
   // 3. A rarity this goal deliberately doesn't collect (chase cards in a play-set goal).
   if (candidate.rarity && goal.excludedRarities.some((r) => r.trim().toLowerCase() === candidate.rarity!.trim().toLowerCase())) {
-    return record('extra', 'excluded-rarity', candidate, top.score, false);
+    return record('extra', 'excluded-rarity', candidate, matchScore, false, fused.source);
   }
 
   // 4. Already have enough. In a dry run this still reads the real (committed) counts, so a dry
   //    run against a partially-built goal reports what a live run would actually do.
-  const owned = getOwnedCounts(goal.id).get(top.productId) ?? 0;
+  const owned = getOwnedCounts(goal.id).get(identifiedId) ?? 0;
   if (owned >= goal.targetCopies) {
-    return record('extra', 'slot-filled', candidate, top.score, false);
+    return record('extra', 'slot-filled', candidate, matchScore, false, fused.source);
   }
 
   // 5. Fills a slot. Only this path stores a thumbnail — it's the only one the review strip
   //    covers, since it's the only one that mutates long-lived goal state.
-  return record('needed', 'fills-slot', candidate, top.score, true);
+  return record('needed', 'fills-slot', candidate, matchScore, true, fused.source);
 }
 
 // ---- review, filing, corrections ----
@@ -539,6 +582,11 @@ export interface CaptureSampleRow {
   id: number; goalCardId: number; frameW: number; frameH: number; cropJson: string;
   productId: number | null; name: string | null; number: string | null;
   outcome: GoalOutcome; reason: GoalReason; score: number | null; voided: boolean;
+  /** What the peer signals concluded — see MatchSource. Shown in the labelling view so a human
+   *  reviewing a frame can see WHICH signal decided it, and what OCR actually read. */
+  matchSource: MatchSource | null;
+  ocrSim: number | null;
+  ocrRaw: string | null;
   /** Explicit ground truth from the labelling view — see capture_labels' doc in db.ts. Distinct
    *  from voided/productId above (the review strip's opinion): this is null until a human has
    *  actually looked at the frame, whereas voided is only ever set on 'needed' outcomes. */
@@ -559,6 +607,7 @@ export function getCaptureSamples(goalSessionId: string): CaptureSampleRow[] {
   return db.prepare(`
     SELECT s.id, s.goal_card_id, s.frame_w, s.frame_h, s.crop_json,
            c.product_id, c.name, c.number, c.outcome, c.reason, c.score, c.voided,
+           c.match_source, c.ocr_sim, c.ocr_raw,
            l.verdict as label_verdict, l.product_id as label_product_id
       FROM capture_samples s
       JOIN goal_cards c ON c.id = s.goal_card_id
@@ -569,6 +618,7 @@ export function getCaptureSamples(goalSessionId: string): CaptureSampleRow[] {
     id: r.id, goalCardId: r.goal_card_id, frameW: r.frame_w, frameH: r.frame_h,
     cropJson: r.crop_json, productId: r.product_id, name: r.name, number: r.number,
     outcome: r.outcome, reason: r.reason, score: r.score, voided: r.voided === 1,
+    matchSource: r.match_source ?? null, ocrSim: r.ocr_sim ?? null, ocrRaw: r.ocr_raw ?? null,
     labelVerdict: r.label_verdict ?? null, labelProductId: r.label_product_id ?? null,
   }));
 }

@@ -125,6 +125,7 @@ export function buildKeeperCsv(session: Session): { csv: string; excluded: Exclu
 interface ManifestRow {
   seq: number; name: string | null; decision: string; reason: string;
   score: number | null; runner_up_score: number | null; runner_up_name: string | null;
+  match_source: string | null; ocr_sim: number | null; ocr_raw: string | null;
   price_cents: number | null; bulk_box_label: string | null; scanned_at: number;
 }
 
@@ -136,6 +137,7 @@ interface ManifestRow {
 export function buildManifestCsv(session: Session): string {
   const rows = db.prepare(`
     SELECT c.seq, c.name, c.decision, c.reason, c.score, c.runner_up_score, c.runner_up_name,
+           c.match_source, c.ocr_sim, c.ocr_raw,
            c.price_cents, b.label as bulk_box_label, c.scanned_at
     FROM cards c
     LEFT JOIN bulk_boxes b ON b.id = c.bulk_box_id
@@ -147,8 +149,11 @@ export function buildManifestCsv(session: Session): string {
   // column that can disagree with its inputs is worse than no column. It earns its place because
   // it, not score, is what the confidence gate actually tests — sorting a manifest by Gap puts
   // the run's real problems on top.
+  // Match Source / OCR Sim / OCR Text are the peer-signal audit trail. OCR Text is the raw
+  // Tesseract string on purpose: when a card is misrouted, what the reader actually saw is the
+  // one column that explains it, and a parsed-and-cleaned version would hide the evidence.
   const header = ['Seq', 'Name', 'Decision', 'Reason', 'Score', 'Runner-Up Score', 'Gap',
-    'Runner-Up', 'Price', 'Bulk Box', 'Scanned At'];
+    'Runner-Up', 'Match Source', 'OCR Sim', 'OCR Text', 'Price', 'Bulk Box', 'Scanned At'];
   const lines = [stringifyCsvRow(header)];
 
   for (const row of rows) {
@@ -164,6 +169,10 @@ export function buildManifestCsv(session: Session): string {
       // Blank on rows written before the column existed — distinguishable from a scan that
       // genuinely had no runner-up only by the score column, which is the honest state.
       row.runner_up_name ?? '',
+      // Blank on rows written before OCR existed — same honest-blank rule as Runner-Up above.
+      row.match_source ?? '',
+      row.ocr_sim !== null ? row.ocr_sim.toFixed(3) : '',
+      row.ocr_raw ?? '',
       row.price_cents !== null ? (row.price_cents / 100).toFixed(2) : '',
       row.bulk_box_label ?? '',
       new Date(row.scanned_at).toISOString(),

@@ -2,6 +2,9 @@
   "minScore": 0.65,
   "minGap": 0.025,
   "minCardScore": 0.6,
+  "ocrEnabled": true,
+  "ocrMinSim": 0.8,
+  "ocrMinTitleChars": 6,
   "defaultThresholdCents": 50,
   "defaultCondition": "Near Mint",
   "captureIntervalMs": 200,
@@ -27,22 +30,73 @@
   "toneDurationMs": 600,
   "toneSettleMs": 800,
   "csvColumns": [
-    { "header": "TCGplayer Id", "field": "skuId" },
-    { "header": "Product Line", "field": "productLine" },
-    { "header": "Set Name", "field": "setName" },
-    { "header": "Product Name", "field": "productName" },
-    { "header": "Title", "field": "" },
-    { "header": "Number", "field": "number" },
-    { "header": "Rarity", "field": "rarity" },
-    { "header": "Condition", "field": "condition" },
-    { "header": "TCG Market Price", "field": "marketPrice" },
-    { "header": "TCG Direct Low", "field": "" },
-    { "header": "TCG Low Price With Shipping", "field": "" },
-    { "header": "TCG Low Price", "field": "lowPrice" },
-    { "header": "Total Quantity", "field": "" },
-    { "header": "Add to Quantity", "field": "quantity" },
-    { "header": "TCG Marketplace Price", "field": "marketPrice" },
-    { "header": "Photo URL", "field": "photoUrl" },
-    { "header": "Location", "field": "location" }
+    {
+      "header": "TCGplayer Id",
+      "field": "skuId"
+    },
+    {
+      "header": "Product Line",
+      "field": "productLine"
+    },
+    {
+      "header": "Set Name",
+      "field": "setName"
+    },
+    {
+      "header": "Product Name",
+      "field": "productName"
+    },
+    {
+      "header": "Title",
+      "field": ""
+    },
+    {
+      "header": "Number",
+      "field": "number"
+    },
+    {
+      "header": "Rarity",
+      "field": "rarity"
+    },
+    {
+      "header": "Condition",
+      "field": "condition"
+    },
+    {
+      "header": "TCG Market Price",
+      "field": "marketPrice"
+    },
+    {
+      "header": "TCG Direct Low",
+      "field": ""
+    },
+    {
+      "header": "TCG Low Price With Shipping",
+      "field": ""
+    },
+    {
+      "header": "TCG Low Price",
+      "field": "lowPrice"
+    },
+    {
+      "header": "Total Quantity",
+      "field": ""
+    },
+    {
+      "header": "Add to Quantity",
+      "field": "quantity"
+    },
+    {
+      "header": "TCG Marketplace Price",
+      "field": "marketPrice"
+    },
+    {
+      "header": "Photo URL",
+      "field": "photoUrl"
+    },
+    {
+      "header": "Location",
+      "field": "location"
+    }
   ]
 }

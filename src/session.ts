@@ -3,9 +3,10 @@ import { db } from './db';
 import { StallError } from './errors';
 import { getProductCached } from './tcgtracking';
 import { matchCard, prewarmEmbeddings } from './embeddings';
+import { readCardTitle, fuseSignals, OcrTitleMatch } from './ocr';
 import { getSettings } from './settings';
 import { fetchSets, getCandidatesForSets, getPricesForProduct, prewarmSet } from './tcgcsv';
-import { BulkBox, CardRecord, Decision, DecisionReason, Session, SessionConfig, SessionStatus, TCGCSVPrice } from './types';
+import { BulkBox, CardRecord, Decision, DecisionReason, MatchSource, Session, SessionConfig, SessionStatus, TCGCSVPrice } from './types';
 
 /** Re-exported from errors.ts, where it moved so Set Builder's scan pipeline can throw the same
  *  type. In THIS pipeline it covers a narrow surface: matching is local (embeddings.ts, no
@@ -130,9 +131,11 @@ function currentOrNewBulkBox(session: Session): BulkBox {
 
 const insertCard = db.prepare(`
   INSERT INTO cards (session_id, seq, product_id, sku_id, name, score, runner_up_score,
-    runner_up_product_id, runner_up_name, price_cents, decision, reason, bulk_box_id, scanned_at)
+    runner_up_product_id, runner_up_name, price_cents, decision, reason, bulk_box_id, scanned_at,
+    match_source, ocr_sim, ocr_raw)
   VALUES (@sessionId, @seq, @productId, @skuId, @name, @score, @runnerUpScore,
-    @runnerUpProductId, @runnerUpName, @priceCents, @decision, @reason, @bulkBoxId, @scannedAt)
+    @runnerUpProductId, @runnerUpName, @priceCents, @decision, @reason, @bulkBoxId, @scannedAt,
+    @matchSource, @ocrSim, @ocrRaw)
 `);
 const nextSeq = db.prepare('SELECT COALESCE(MAX(seq), 0) + 1 as n FROM cards WHERE session_id = ?');
 
@@ -195,14 +198,24 @@ export async function scanCard(sessionId: string, imageBuffer: Buffer): Promise<
   const session = getSession(sessionId);
   if (!session) throw new Error(`Session ${sessionId} not found`);
 
+  const settings = getSettings();
   let top, runnerUp, candidates;
+  let ocr: OcrTitleMatch | null = null;
   try {
     // Scoped to the session's printing — a product with no price in this variant is not a
     // possible answer for this run, and leaving it in only manufactures ties (see tcgcsv.ts).
+    // The same scoped list feeds OCR; see ocr.ts on why scoping is what makes a title read
+    // sufficient rather than merely suggestive.
     candidates = getCandidatesForSets(session.setIds, session.variant);
-    const match = await matchCard(imageBuffer, candidates);
+    const [match, ocrResult] = await Promise.all([
+      matchCard(imageBuffer, candidates),
+      settings.ocrEnabled
+        ? readCardTitle(imageBuffer, candidates, { minTitleChars: settings.ocrMinTitleChars })
+        : Promise.resolve(null),
+    ]);
     top = match.top;
     runnerUp = match.runnerUp;
+    ocr = ocrResult;
   } catch (err) {
     updateSessionStatus.run('stalled', Date.now(), sessionId);
     throw new StallError(err instanceof Error ? err.message : 'recognition failed');
@@ -219,57 +232,79 @@ export async function scanCard(sessionId: string, imageBuffer: Buffer): Promise<
   const runnerUpProductId = runnerUp?.productId ?? null;
   const runnerUpName = runnerUp ? candidates.find((c) => c.productId === runnerUp!.productId)?.name ?? null : null;
 
-  const recordBulk = (reason: DecisionReason, productId: number | null, name: string | null, score: number | null, skuId: number | null, priceCents: number | null): ScanCardResult => {
+  const recordBulk = (reason: DecisionReason, productId: number | null, name: string | null, score: number | null, skuId: number | null, priceCents: number | null, matchSource: MatchSource | null = null): ScanCardResult => {
     const box = currentOrNewBulkBox(session);
     incrementBulkBoxCount.run(box.id);
     const info = insertCard.run({
       sessionId, seq, productId, skuId, name, score, runnerUpScore: runnerUp?.score ?? null,
       runnerUpProductId, runnerUpName,
       priceCents, decision: 'bulk', reason, bulkBoxId: box.id, scannedAt,
+      matchSource, ocrSim: ocr?.sim ?? null, ocrRaw: ocr?.raw ?? null,
     });
     return { decision: 'bulk', reason, card: getCard(info.lastInsertRowid as number) };
   };
 
-  if (!top) {
+  // The peer decision — see ocr.ts. Note this uses the SESSION's minScore/minGap (a price run
+  // tunes its own gate) but the global ocrMinSim, which is a property of the reader, not the run.
+  const fused = fuseSignals({
+    top, runnerUp, ocr,
+    minScore: session.minScore, minGap: session.minGap, ocrMinSim: settings.ocrMinSim,
+  });
+
+  if (!top && !fused.ocrConfident) {
     return recordBulk('low-confidence', null, null, null, null, null);
   }
 
-  const name = candidates.find((c) => c.productId === top!.productId)?.name ?? null;
+  const clipName = top ? candidates.find((c) => c.productId === top!.productId)?.name ?? null : null;
 
   // Server-side backstop for phantom captures — see AppSettings.minCardScore's doc. Checked
   // BEFORE the confidence gate, not folded into it: this is "did anything here resemble a card
   // at all", a different question from "which card, confidently". Never changes routing (both
   // reasons hit the same recordBulk path) — it only makes the manifest tell the two apart.
-  if (top.score < getSettings().minCardScore) {
-    return recordBulk('not-a-card', top.productId, name, top.score, null, null);
+  // A confident OCR read vetoes it, for the reason spelled out in goals.ts.
+  if (top && top.score < settings.minCardScore && !fused.ocrConfident) {
+    return recordBulk('not-a-card', top.productId, clipName, top.score, null, null);
   }
 
-  const confident = top.score >= session.minScore && (!runnerUp || top.score - runnerUp.score >= session.minGap);
+  // Both signals confident and disagreeing. Fails safe to bulk with its own reason rather than
+  // picking a winner — see FusedMatch.conflict.
+  if (fused.conflict) {
+    console.warn(
+      `[session] signal conflict on seq ${seq}: embedding says ${top!.productId} (${clipName ?? '?'}) `
+      + `@ ${top!.score.toFixed(4)}, OCR says ${ocr!.productId} @ sim ${ocr!.sim.toFixed(3)} from "${ocr!.raw}"`,
+    );
+    return recordBulk('signal-conflict', top!.productId, clipName, top!.score, null, null);
+  }
 
-  if (!confident) {
+  if (fused.productId == null) {
     // Log the best guess anyway — this is what makes the bulk pile searchable per plan
     // Decision #2, even though we don't trust it enough to act on it.
-    return recordBulk('low-confidence', top.productId, name, top.score, null, null);
+    return recordBulk('low-confidence', top?.productId ?? null, clipName, top?.score ?? null, null, null);
   }
 
-  const priceCents = resolvePriceCents(getPricesForProduct(top.productId), session.variant);
+  const identifiedId = fused.productId;
+  const name = candidates.find((c) => c.productId === identifiedId)?.name ?? null;
+  const matchScore = top?.score ?? null;
+
+  const priceCents = resolvePriceCents(getPricesForProduct(identifiedId), session.variant);
 
   if (priceCents === null) {
-    return recordBulk('low-confidence', top.productId, name, top.score, null, null);
+    return recordBulk('low-confidence', identifiedId, name, matchScore, null, null, fused.source);
   }
 
   const decision: Decision = priceCents >= session.thresholdCents ? 'keeper' : 'bulk';
   const reason: DecisionReason = decision === 'keeper' ? 'above-threshold' : 'below-threshold';
 
   if (decision === 'bulk') {
-    return recordBulk(reason, top.productId, name, top.score, null, priceCents);
+    return recordBulk(reason, identifiedId, name, matchScore, null, priceCents, fused.source);
   }
 
-  const skuId = await resolveSkuForKeeper(top.productId, session.variant, session.condition);
+  const skuId = await resolveSkuForKeeper(identifiedId, session.variant, session.condition);
   const info = insertCard.run({
-    sessionId, seq, productId: top.productId, skuId, name,
-    score: top.score, runnerUpScore: runnerUp?.score ?? null, runnerUpProductId, runnerUpName,
+    sessionId, seq, productId: identifiedId, skuId, name,
+    score: matchScore, runnerUpScore: runnerUp?.score ?? null, runnerUpProductId, runnerUpName,
     priceCents, decision: 'keeper', reason, bulkBoxId: null, scannedAt,
+    matchSource: fused.source, ocrSim: ocr?.sim ?? null, ocrRaw: ocr?.raw ?? null,
   });
   return { decision: 'keeper', reason, card: getCard(info.lastInsertRowid as number) };
 }
@@ -281,6 +316,7 @@ interface CardRow {
   name: string | null; score: number | null; runner_up_score: number | null;
   runner_up_product_id: number | null; runner_up_name: string | null; price_cents: number | null;
   decision: Decision; reason: DecisionReason; bulk_box_id: number | null; scanned_at: number;
+  match_source: MatchSource | null; ocr_sim: number | null; ocr_raw: string | null;
 }
 
 function toCard(row: CardRow): CardRecord {
@@ -290,6 +326,7 @@ function toCard(row: CardRow): CardRecord {
     runnerUpProductId: row.runner_up_product_id, runnerUpName: row.runner_up_name,
     priceCents: row.price_cents,
     decision: row.decision, reason: row.reason, bulkBoxId: row.bulk_box_id, scannedAt: row.scanned_at,
+    matchSource: row.match_source, ocrSim: row.ocr_sim, ocrRaw: row.ocr_raw,
   };
 }
 
