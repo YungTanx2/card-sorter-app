@@ -117,6 +117,10 @@
   .candidate img { width: 100%; aspect-ratio: 5/7; object-fit: cover; border-radius: 4px; background: #000; }
   .candidate .cname { color: var(--text); font-weight: 600; margin-top: 0.25rem; display: block; }
   .candidate .cscore { font-family: monospace; }
+  /* The raw Tesseract string. Monospace because the interesting part is usually a single
+     mangled character, and a proportional font hides exactly that. */
+  .ocr-line { font-family: monospace; font-size: 0.78rem; color: var(--muted); margin-top: 0.15rem;
+    overflow-wrap: anywhere; }
 
   input[type=text] {
     width: 100%; background: var(--surface); border: 1px solid var(--border); color: var(--text);
@@ -185,9 +189,11 @@
         <span>Seq <span id="sample-seq"></span> ·
           <span class="badge" id="sample-outcome-badge"></span>
           <span id="sample-reason"></span> ·
-          score <span id="sample-score"></span>
+          score <span id="sample-score"></span> ·
+          <span id="sample-source"></span>
         </span>
         <div class="top-name" id="sample-top-name"></div>
+        <div class="ocr-line" id="sample-ocr"></div>
         <div id="sample-label-status"></div>
       </div>
 
@@ -390,6 +396,12 @@
     badge.className = 'badge ' + s.outcome;
     $('sample-reason').textContent = s.reason;
     $('sample-score').textContent = s.score != null ? s.score.toFixed(4) : '—';
+    // Which signal decided this frame, and what OCR read. textContent throughout — card names
+    // and raw OCR output both routinely contain characters that are markup in innerHTML.
+    $('sample-source').textContent = s.matchSource ? 'via ' + s.matchSource : 'via —';
+    $('sample-ocr').textContent = s.ocrRaw
+      ? 'OCR ' + (s.ocrSim != null ? s.ocrSim.toFixed(2) : '?') + ': "' + s.ocrRaw + '"'
+      : '';
     $('sample-top-name').textContent = s.name ? ('Recorded top guess: ' + s.name + (s.number ? ' (' + s.number + ')' : '')) : 'Recorded top guess: (none)';
 
     const status = $('sample-label-status');

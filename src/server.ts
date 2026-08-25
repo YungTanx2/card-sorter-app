@@ -2,6 +2,7 @@ import express from 'express';
 import multer from 'multer';
 import path from 'path';
 import { db } from './db';
+import { shutdownOcr } from './ocr';
 import { fetchCategories, fetchSets, fetchVariants, fetchRarities, getCandidatesForSets } from './tcgcsv';
 import { scoreCandidates } from './embeddings';
 import sharp from 'sharp';
@@ -605,7 +606,15 @@ function shutdown(signal: string) {
   if (shuttingDown) return;
   shuttingDown = true;
   console.log(`[shutdown] ${signal} received — closing server and database`);
-  server.close(() => {
+  server.close(async () => {
+    // Tesseract runs in a worker thread; leaving it alive holds the event loop open and turns a
+    // clean handover back into a SIGKILL-after-timeout, which is the exact failure this handler
+    // exists to prevent. Awaited before the db close so a hung worker can't skip the checkpoint.
+    try {
+      await shutdownOcr();
+    } catch (err) {
+      console.warn('[shutdown] ocr worker close failed:', err instanceof Error ? err.message : err);
+    }
     try {
       db.close(); // checkpoints the WAL
     } catch (err) {

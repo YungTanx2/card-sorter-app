@@ -19,7 +19,7 @@ export type Decision = 'keeper' | 'bulk';
  * hand in frame, a rig whose baseline is stale). Kept as its own reason rather than folded into
  * low-confidence so the manifest can tell the two apart.
  */
-export type DecisionReason = 'above-threshold' | 'below-threshold' | 'low-confidence' | 'not-a-card' | 'scan-error';
+export type DecisionReason = 'above-threshold' | 'below-threshold' | 'low-confidence' | 'not-a-card' | 'scan-error' | 'signal-conflict';
 
 export type SessionStatus = 'active' | 'stalled' | 'complete';
 
@@ -149,6 +149,10 @@ export interface CardRecord {
   priceCents: number | null;
   decision: Decision;
   reason: DecisionReason;
+  /** Which signal identified this card — see MatchSource. Null when nothing did. */
+  matchSource: MatchSource | null;
+  ocrSim: number | null;
+  ocrRaw: string | null;
   bulkBoxId: number | null;
   scannedAt: number;
 }
@@ -176,7 +180,16 @@ export type GoalOutcome = 'needed' | 'extra';
  * which is what makes the failure self-healing — you'll re-run the pile and get another shot.
  */
 /** 'not-a-card' — see DecisionReason's doc; same distinction, same reasoning, applies here too. */
-export type GoalReason = 'fills-slot' | 'slot-filled' | 'excluded-rarity' | 'not-a-set-slot' | 'low-confidence' | 'not-a-card';
+export type GoalReason = 'fills-slot' | 'slot-filled' | 'excluded-rarity' | 'not-a-set-slot' | 'low-confidence' | 'not-a-card' | 'signal-conflict';
+
+/**
+ * Which signal identified the card. Recorded on every row so a run's manifest shows not just what
+ * was decided but WHICH evidence decided it — the two signals fail on disjoint cards, so a shift
+ * in this distribution is the earliest visible sign that one of them has degraded.
+ *
+ * 'both' is the healthy majority case: embedding and OCR independently agreed.
+ */
+export type MatchSource = 'clip' | 'ocr' | 'both';
 
 export type GoalStatus = 'active' | 'complete';
 
@@ -234,6 +247,15 @@ export interface GoalCard {
   runnerUpName: string | null;
   outcome: GoalOutcome;
   reason: GoalReason;
+  /** Which signal identified this card — null when nothing did (low-confidence, not-a-card). */
+  matchSource: MatchSource | null;
+  /** OCR's fuzzy title similarity in [0, 1], or null when OCR produced no read at all. Kept on
+   *  every row, including ones the embedding decided, so a disagreement is diagnosable after
+   *  the fact rather than only in the logs. */
+  ocrSim: number | null;
+  /** Exactly what Tesseract returned. The single most useful field when an OCR miss needs
+   *  explaining — "it read MULAN as MUIAN" is actionable in a way a similarity score is not. */
+  ocrRaw: string | null;
   /** Set by the review strip when a capture turns out not to match the card it filled. Voiding
    *  is the only way a slot un-fills, and the derived count follows automatically. */
   voided: boolean;
@@ -299,6 +321,33 @@ export interface AppSettings {
    * either way. Revisit this value once Location scores recover.
    */
   minCardScore: number;
+  /**
+   * OCR peer signal (src/ocr.ts). Reads the printed title and resolves it against the same
+   * variant-scoped candidate pool the embedding matcher uses.
+   *
+   * ocrMinSim 0.80 comes from the 57-frame labelled corpus of the 2026-08-17 dry run, where it
+   * was the loosest threshold that still held 100% rescue precision:
+   *
+   *     sim>=0.90   4 rescued, 0 wrong      sim>=0.80  13 rescued,  0 wrong
+   *     sim>=0.85   9 rescued, 0 wrong      sim>=0.75  15 rescued,  1 wrong  <- precision breaks
+   *
+   * Overall that moved the gate from 56% recall / 97% precision to 79% / 98%. Caveat worth
+   * keeping in view: 13 rescues with zero errors cannot distinguish 100% precision from ~80% —
+   * the 95% lower bound is around 75%. Tighten to 0.85 at the first sign of a wrong route.
+   *
+   * ocrEnabled is a kill switch, not a tuning knob. Turning it off restores exact pre-OCR
+   * behaviour, which is what makes this safe to ship before the foil-glare case has been
+   * measured (a Cold Foil run is still untested — see [[project_tcg-card-sorter]]).
+   */
+  ocrEnabled: boolean;
+  ocrMinSim: number;
+  /**
+   * Titles shorter than this are excluded from the OCR index entirely. Fuzzy substring matching
+   * will find a low-distance window for a 4-character title inside almost any noise — during the
+   * feasibility run "RAHR" was confidently matched against reads that contained no letters from
+   * it at all. 6 keeps every real card name while removing that whole failure class.
+   */
+  ocrMinTitleChars: number;
   defaultThresholdCents: number;
   defaultCondition: string;
   captureIntervalMs: number;

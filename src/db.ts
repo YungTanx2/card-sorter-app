@@ -313,6 +313,17 @@ addColumn('cards', 'runner_up_name', 'TEXT');
 addColumn('goal_cards', 'runner_up_product_id', 'INTEGER');
 addColumn('goal_cards', 'runner_up_name', 'TEXT');
 
+// OCR peer signal (src/ocr.ts). Recorded on cards and goal_cards alike so a run's manifest shows
+// WHICH signal identified each card, not just what was decided. ocr_raw is deliberately the raw
+// Tesseract string rather than a parsed field: when a read goes wrong, the characters it actually
+// produced are the only thing that explains why.
+addColumn('cards', 'match_source', 'TEXT');
+addColumn('cards', 'ocr_sim', 'REAL');
+addColumn('cards', 'ocr_raw', 'TEXT');
+addColumn('goal_cards', 'match_source', 'TEXT');
+addColumn('goal_cards', 'ocr_sim', 'REAL');
+addColumn('goal_cards', 'ocr_raw', 'TEXT');
+
 /**
  * embedding_cache: product_id PRIMARY KEY -> (product_id, model_id, variant) PRIMARY KEY.
  *
