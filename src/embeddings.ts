@@ -61,11 +61,43 @@ export function cosineSimilarity(a: number[], b: number[]): number {
   return dot / (Math.sqrt(normA) * Math.sqrt(normB));
 }
 
-const selectEmbedding = db.prepare('SELECT embedding FROM embedding_cache WHERE product_id = ?');
+const selectVariants = db.prepare(
+  'SELECT variant, embedding FROM embedding_cache WHERE product_id = ? AND model_id = ?');
+const selectOneVariant = db.prepare(
+  'SELECT 1 FROM embedding_cache WHERE product_id = ? AND model_id = ? AND variant = ?');
 const upsertEmbedding = db.prepare(`
-  INSERT INTO embedding_cache (product_id, embedding, fetched_at) VALUES (@productId, @embedding, @fetchedAt)
-  ON CONFLICT(product_id) DO UPDATE SET embedding = excluded.embedding, fetched_at = excluded.fetched_at
+  INSERT INTO embedding_cache (product_id, model_id, variant, embedding, fetched_at)
+  VALUES (@productId, @modelId, @variant, @embedding, @fetchedAt)
+  ON CONFLICT(product_id, model_id, variant)
+  DO UPDATE SET embedding = excluded.embedding, fetched_at = excluded.fetched_at
 `);
+
+/**
+ * Extra orientations to embed for a reference image, on top of 'base'.
+ *
+ * Lorcana Location cards are printed with LANDSCAPE artwork on a normal portrait card, so TCGCSV
+ * serves their reference image rotated 90 degrees relative to how the machine sees them — the card
+ * goes through the feeder in the same physical orientation as everything else. Measured on the
+ * 2026-08-24 corpus, all 3 Location frames ranked 207th / 159th / 34th out of 217, and produced
+ * the only silent misroute among 57 labelled cards.
+ *
+ * BOTH rotations are stored, not just one: the card can be fed either way up, and picking a single
+ * direction would fix half the cases and leave the other half exactly as broken. Detection is on
+ * the image's own aspect ratio rather than a name or card-type lookup, because the thing that
+ * actually breaks matching is the reference art being landscape — whatever the game calls it.
+ */
+const ROTATIONS: Record<string, number> = { rot90: 90, rot270: 270 };
+
+async function variantsFor(image: Buffer): Promise<Array<{ variant: string; buf: Buffer }>> {
+  const out = [{ variant: 'base', buf: image }];
+  const meta = await sharp(image).metadata();
+  if ((meta.width ?? 0) > (meta.height ?? 0)) {
+    for (const [variant, angle] of Object.entries(ROTATIONS)) {
+      out.push({ variant, buf: await sharp(image).rotate(angle).toBuffer() });
+    }
+  }
+  return out;
+}
 
 /**
  * Cache-aside: embeds a candidate's TCGCSV reference photo once, reused by every future
@@ -73,22 +105,31 @@ const upsertEmbedding = db.prepare(`
  * to redo per run — same reasoning as the old product_cache, just for vectors instead of SKUs).
  * Errors on one candidate (a dead imageUrl, a fetch failure) are swallowed with a warning —
  * one missing reference photo shouldn't fail pre-warming the other ~150-250 candidates in a set.
+ *
+ * Returns EVERY stored orientation for the candidate — see variantsFor().
  */
-async function getCandidateEmbedding(candidate: CandidateCard): Promise<number[] | null> {
-  const cached = selectEmbedding.get(candidate.productId) as { embedding: string } | undefined;
-  if (cached) return JSON.parse(cached.embedding) as number[];
-  if (!candidate.imageUrl) return null;
+async function getCandidateEmbeddings(candidate: CandidateCard): Promise<number[][]> {
+  const cached = selectVariants.all(candidate.productId, MODEL_ID) as { variant: string; embedding: string }[];
+  if (cached.length) return cached.map((r) => JSON.parse(r.embedding) as number[]);
+  if (!candidate.imageUrl) return [];
 
   try {
     const res = await fetch(candidate.imageUrl, { headers: { 'User-Agent': 'card-sorter-app/1.0' } });
     if (!res.ok) throw new Error(`image fetch failed: ${res.status}`);
     const buf = Buffer.from(await res.arrayBuffer());
-    const embedding = await embedImage(buf);
-    upsertEmbedding.run({ productId: candidate.productId, embedding: JSON.stringify(embedding), fetchedAt: Date.now() });
-    return embedding;
+    const out: number[][] = [];
+    for (const { variant, buf: img } of await variantsFor(buf)) {
+      const embedding = await embedImage(img);
+      upsertEmbedding.run({
+        productId: candidate.productId, modelId: MODEL_ID, variant,
+        embedding: JSON.stringify(embedding), fetchedAt: Date.now(),
+      });
+      out.push(embedding);
+    }
+    return out;
   } catch (err) {
     console.warn(`[embeddings] skipping candidate ${candidate.productId} (${candidate.name}):`, err instanceof Error ? err.message : err);
-    return null;
+    return [];
   }
 }
 
@@ -96,7 +137,38 @@ async function getCandidateEmbedding(candidate: CandidateCard): Promise<number[]
  *  creation (session.ts) — the reason scanCard() needs no network calls during an actual run. */
 export async function prewarmEmbeddings(candidates: CandidateCard[]): Promise<void> {
   for (const c of candidates) {
-    await getCandidateEmbedding(c);
+    // A cache populated before rotations existed has only the 'base' row for a landscape card, and
+    // that row alone would make getCandidateEmbeddings() report the candidate as fully warmed. Ask
+    // for the rotations specifically so an existing deployment backfills them instead of silently
+    // keeping the broken single-orientation match.
+    const needsBackfill = !selectOneVariant.get(c.productId, MODEL_ID, 'rot90');
+    if (needsBackfill) await backfillRotations(c);
+    await getCandidateEmbeddings(c);
+  }
+}
+
+/** Adds rotated variants for an already-cached landscape reference. No-op for portrait art. */
+async function backfillRotations(candidate: CandidateCard): Promise<void> {
+  if (!candidate.imageUrl) return;
+  const hasBase = selectOneVariant.get(candidate.productId, MODEL_ID, 'base');
+  if (!hasBase) return; // nothing cached yet — the normal path will embed every variant anyway
+  try {
+    const res = await fetch(candidate.imageUrl, { headers: { 'User-Agent': 'card-sorter-app/1.0' } });
+    if (!res.ok) return;
+    const buf = Buffer.from(await res.arrayBuffer());
+    const meta = await sharp(buf).metadata();
+    if ((meta.width ?? 0) <= (meta.height ?? 0)) return; // portrait — base is the only orientation
+    for (const [variant, angle] of Object.entries(ROTATIONS)) {
+      if (selectOneVariant.get(candidate.productId, MODEL_ID, variant)) continue;
+      const embedding = await embedImage(await sharp(buf).rotate(angle).toBuffer());
+      upsertEmbedding.run({
+        productId: candidate.productId, modelId: MODEL_ID, variant,
+        embedding: JSON.stringify(embedding), fetchedAt: Date.now(),
+      });
+      console.log(`[embeddings] backfilled ${variant} for landscape reference ${candidate.productId} (${candidate.name})`);
+    }
+  } catch (err) {
+    console.warn(`[embeddings] rotation backfill failed for ${candidate.productId}:`, err instanceof Error ? err.message : err);
   }
 }
 
@@ -112,10 +184,18 @@ export async function scoreCandidates(imageBuffer: Buffer, candidates: Candidate
 
   const scored: EmbeddingMatch[] = [];
   for (const c of candidates) {
-    const cached = selectEmbedding.get(c.productId) as { embedding: string } | undefined;
-    if (!cached) continue; // candidate whose reference image never embedded successfully — skip, don't guess
-    const score = cosineSimilarity(queryEmbedding, JSON.parse(cached.embedding) as number[]);
-    scored.push({ productId: c.productId, score });
+    const rows = selectVariants.all(c.productId, MODEL_ID) as { variant: string; embedding: string }[];
+    if (rows.length === 0) continue; // reference image never embedded successfully — skip, don't guess
+    // MAX across orientations, not mean: the variants are the same card photographed different
+    // ways up, so exactly one of them should match a given capture well and the others should
+    // match it poorly. Averaging would drag a correct match down by the cost of its own wrong
+    // rotations, which is the opposite of what storing them is for.
+    let best = -Infinity;
+    for (const row of rows) {
+      const s = cosineSimilarity(queryEmbedding, JSON.parse(row.embedding) as number[]);
+      if (s > best) best = s;
+    }
+    scored.push({ productId: c.productId, score: best });
   }
   scored.sort((a, b) => b.score - a.score);
   return scored;
