@@ -30,6 +30,8 @@
  * alone routed 14 cards OCR missed, OCR alone routed 13 cards CLIP missed, 18 were carried by
  * both, and there were ZERO disagreements. fuseSignals() below is how they combine.
  */
+import fs from 'fs';
+import path from 'path';
 import sharp from 'sharp';
 import type { CandidateCard, EmbeddingMatch, MatchSource } from './types';
 
@@ -38,13 +40,56 @@ const CARD_ASPECT = 0.716; // 63mm x 88mm
 const OCR_CHAR_WHITELIST =
   "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz'&.- ";
 
+/**
+ * Tesseract's language model, vendored into the repo rather than fetched at runtime.
+ *
+ * tesseract.js downloads eng.traineddata (5.2MB) from a CDN on first use and caches it in the
+ * PROCESS WORKING DIRECTORY. Both halves of that are wrong here:
+ *
+ *   - It is an external network dependency in the recognition path, which the whole reason this
+ *     app runs a local model instead of a vision API was to avoid (PRD Goal: "without any
+ *     per-scan API cost, API key, or external recognition dependency").
+ *   - Railway's container filesystem is ephemeral and is NOT the mounted volume, so the cache
+ *     never survives a deploy — every release would re-download it, and the cost would land on
+ *     the first card of the run rather than at boot.
+ *
+ * langPath + cacheMethod 'none' makes startup fully offline. Resolved from __dirname so it works
+ * from both src/ (ts-node) and dist/ (production).
+ */
+const TESSDATA_PATH = path.resolve(__dirname, '..', 'vendor', 'tessdata');
+
+/**
+ * Verified before the worker is created, because a MISSING model does not fail politely.
+ *
+ * tesseract.js raises that failure asynchronously from the worker thread, where it arrives as an
+ * uncaughtException and takes the whole process down — it does NOT reject the createWorker promise,
+ * so readCardTitle's try/catch never sees it. Measured, not assumed: renaming the vendored file
+ * crashed Node outright rather than degrading to embedding-only.
+ *
+ * A cheap existsSync turns that into the intended behaviour — OCR goes quiet, the embedding
+ * carries the run. Which matters precisely because this file is the one part of the OCR path that
+ * a bad deploy can plausibly lose.
+ */
+function tessdataPresent(): boolean {
+  try { return fs.existsSync(path.join(TESSDATA_PATH, 'eng.traineddata')); } catch { return false; }
+}
+
 /** Tesseract is lazily created and reused — worker startup dominates a single recognize() call. */
 let workerPromise: Promise<any> | null = null;
 async function getWorker(): Promise<any> {
   if (!workerPromise) {
     workerPromise = (async () => {
+      if (!tessdataPresent()) {
+        throw new Error(`no eng.traineddata under ${TESSDATA_PATH} — OCR disabled for this process`);
+      }
       const { createWorker, PSM } = await import('tesseract.js');
-      const w = await createWorker('eng');
+      const w = await createWorker('eng', undefined, {
+        langPath: TESSDATA_PATH,
+        // The vendored file is the uncompressed .traineddata, so the default gzip lookup
+        // (eng.traineddata.gz) would 404 and silently fall back to the CDN.
+        gzip: false,
+        cacheMethod: 'none',
+      });
       await w.setParameters({
         tessedit_pageseg_mode: PSM.SINGLE_LINE,
         // Digits are deliberately excluded: the name bar sits beside the cost/strength/willpower
