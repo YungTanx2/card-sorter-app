@@ -49,13 +49,33 @@ db.exec(`
     fetched_at   INTEGER NOT NULL
   );
 
-  -- CLIP embedding per candidate card, keyed by TCGCSV product_id — populated once per
-  -- (product, embedding model) and reused across every future session that scopes the same
-  -- set, since re-embedding is the compute-expensive step. embedding is JSON.stringify(number[]).
+  -- CLIP embedding per (candidate card, model, variant), reused across every future session that
+  -- scopes the same set, since re-embedding is the compute-expensive step. embedding is
+  -- JSON.stringify(number[]).
+  --
+  -- The key is a COMPOSITE for two reasons, both of which were silent-corruption bugs when the
+  -- key was product_id alone (its comment claimed "per (product, embedding model)" while the
+  -- schema enforced no such thing):
+  --
+  --   model_id  Swapping embedding models would score new query vectors against old candidate
+  --             vectors from a different model. Cosine similarity between two unrelated vector
+  --             spaces returns a number, not an error, so every match would be garbage with
+  --             nothing anywhere reporting a problem.
+  --   variant   A card can need MORE THAN ONE embedding. Lorcana Location cards are printed with
+  --             landscape artwork but fed through the machine portrait like every other card, so
+  --             their TCGCSV reference image (200x143) is rotated 90 degrees relative to every
+  --             capture of them. Measured on the 2026-08-24 corpus: all 3 Location frames ranked
+  --             207th, 159th and 34th of 217 — worse than chance, and the source of the only
+  --             silent misroute in 57 labelled cards. The fix is to ALSO store rotated variants
+  --             and match against whichever scores best, which needs room for several rows per
+  --             product. 'base' is the reference image as TCGCSV serves it.
   CREATE TABLE IF NOT EXISTS embedding_cache (
-    product_id INTEGER PRIMARY KEY,
+    product_id INTEGER NOT NULL,
+    model_id   TEXT NOT NULL,
+    variant    TEXT NOT NULL,
     embedding  TEXT NOT NULL,
-    fetched_at INTEGER NOT NULL
+    fetched_at INTEGER NOT NULL,
+    PRIMARY KEY (product_id, model_id, variant)
   );
 
   CREATE TABLE IF NOT EXISTS sessions (
@@ -279,3 +299,44 @@ addColumn('cards', 'runner_up_product_id', 'INTEGER');
 addColumn('cards', 'runner_up_name', 'TEXT');
 addColumn('goal_cards', 'runner_up_product_id', 'INTEGER');
 addColumn('goal_cards', 'runner_up_name', 'TEXT');
+
+/**
+ * embedding_cache: product_id PRIMARY KEY -> (product_id, model_id, variant) PRIMARY KEY.
+ *
+ * SQLite cannot ALTER a primary key, so this is the standard create-copy-swap. Wrapped in a
+ * transaction because a half-finished swap would leave the app with no embedding cache at all —
+ * recoverable (it would just re-embed) but a slow, confusing first run on every set.
+ *
+ * Existing rows are PRESERVED rather than dropped: they are genuine CLIP ViT-B/32 embeddings of
+ * the base reference image, which is exactly what ('Xenova/clip-vit-base-patch32', 'base') means
+ * under the new key. Re-embedding a whole catalog costs ~90s per set, so throwing them away would
+ * be a real cost for no benefit.
+ */
+function migrateEmbeddingCacheKey(): void {
+  const cols = db.prepare('SELECT name FROM pragma_table_info(?)').all('embedding_cache') as { name: string }[];
+  if (cols.length === 0 || cols.some((c) => c.name === 'model_id')) return; // fresh DB, or already migrated
+
+  const LEGACY_MODEL = 'Xenova/clip-vit-base-patch32';
+  db.transaction(() => {
+    db.exec('ALTER TABLE embedding_cache RENAME TO embedding_cache_legacy');
+    db.exec(`
+      CREATE TABLE embedding_cache (
+        product_id INTEGER NOT NULL,
+        model_id   TEXT NOT NULL,
+        variant    TEXT NOT NULL,
+        embedding  TEXT NOT NULL,
+        fetched_at INTEGER NOT NULL,
+        PRIMARY KEY (product_id, model_id, variant)
+      )
+    `);
+    db.prepare(`
+      INSERT INTO embedding_cache (product_id, model_id, variant, embedding, fetched_at)
+      SELECT product_id, ?, 'base', embedding, fetched_at FROM embedding_cache_legacy
+    `).run(LEGACY_MODEL);
+    db.exec('DROP TABLE embedding_cache_legacy');
+  })();
+
+  const n = (db.prepare('SELECT COUNT(*) AS n FROM embedding_cache').get() as { n: number }).n;
+  console.log(`[db] migrated: embedding_cache re-keyed to (product_id, model_id, variant); ${n} rows carried over as ${LEGACY_MODEL}/base`);
+}
+migrateEmbeddingCacheKey();
