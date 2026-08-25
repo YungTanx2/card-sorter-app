@@ -88,10 +88,19 @@ const upsertEmbedding = db.prepare(`
  */
 const ROTATIONS: Record<string, number> = { rot90: 90, rot270: 270 };
 
-async function variantsFor(image: Buffer): Promise<Array<{ variant: string; buf: Buffer }>> {
+const selectRefMeta = db.prepare('SELECT is_landscape FROM reference_meta WHERE product_id = ?');
+const upsertRefMeta = db.prepare(`
+  INSERT INTO reference_meta (product_id, is_landscape, checked_at)
+  VALUES (@productId, @isLandscape, @checkedAt)
+  ON CONFLICT(product_id) DO UPDATE SET is_landscape = excluded.is_landscape, checked_at = excluded.checked_at
+`);
+
+async function variantsFor(productId: number, image: Buffer): Promise<Array<{ variant: string; buf: Buffer }>> {
   const out = [{ variant: 'base', buf: image }];
   const meta = await sharp(image).metadata();
-  if ((meta.width ?? 0) > (meta.height ?? 0)) {
+  const isLandscape = (meta.width ?? 0) > (meta.height ?? 0);
+  upsertRefMeta.run({ productId, isLandscape: isLandscape ? 1 : 0, checkedAt: Date.now() });
+  if (isLandscape) {
     for (const [variant, angle] of Object.entries(ROTATIONS)) {
       out.push({ variant, buf: await sharp(image).rotate(angle).toBuffer() });
     }
@@ -118,7 +127,7 @@ async function getCandidateEmbeddings(candidate: CandidateCard): Promise<number[
     if (!res.ok) throw new Error(`image fetch failed: ${res.status}`);
     const buf = Buffer.from(await res.arrayBuffer());
     const out: number[][] = [];
-    for (const { variant, buf: img } of await variantsFor(buf)) {
+    for (const { variant, buf: img } of await variantsFor(candidate.productId, buf)) {
       const embedding = await embedImage(img);
       upsertEmbedding.run({
         productId: candidate.productId, modelId: MODEL_ID, variant,
@@ -136,28 +145,45 @@ async function getCandidateEmbeddings(candidate: CandidateCard): Promise<number[
 /** Pre-warms embeddings for every candidate in a session's scope. Called once at session
  *  creation (session.ts) — the reason scanCard() needs no network calls during an actual run. */
 export async function prewarmEmbeddings(candidates: CandidateCard[]): Promise<void> {
+  let backfilled = 0;
   for (const c of candidates) {
-    // A cache populated before rotations existed has only the 'base' row for a landscape card, and
-    // that row alone would make getCandidateEmbeddings() report the candidate as fully warmed. Ask
-    // for the rotations specifically so an existing deployment backfills them instead of silently
-    // keeping the broken single-orientation match.
-    const needsBackfill = !selectOneVariant.get(c.productId, MODEL_ID, 'rot90');
-    if (needsBackfill) await backfillRotations(c);
+    if (await backfillRotations(c)) backfilled++;
     await getCandidateEmbeddings(c);
   }
+  if (backfilled) console.log(`[embeddings] added rotated variants for ${backfilled} landscape reference(s)`);
 }
 
-/** Adds rotated variants for an already-cached landscape reference. No-op for portrait art. */
-async function backfillRotations(candidate: CandidateCard): Promise<void> {
-  if (!candidate.imageUrl) return;
-  const hasBase = selectOneVariant.get(candidate.productId, MODEL_ID, 'base');
-  if (!hasBase) return; // nothing cached yet — the normal path will embed every variant anyway
+/**
+ * Adds rotated variants to an already-cached reference. Returns true if it embedded anything.
+ *
+ * Only needed for caches written before rotations existed: a landscape card cached back then has
+ * just its 'base' row, and that alone makes getCandidateEmbeddings() consider it fully warmed, so
+ * without this an existing deployment would keep the broken single-orientation match forever.
+ *
+ * The reference_meta lookup is what keeps this cheap. Deciding "is this landscape?" needs the
+ * image, so checking it live would re-download every reference in the set on every single prewarm
+ * — ~261 images per run, forever, to answer a question whose answer never changes. Recording the
+ * answer once turns all subsequent runs into a single indexed read per candidate.
+ */
+async function backfillRotations(candidate: CandidateCard): Promise<boolean> {
+  if (!candidate.imageUrl) return false;
+  // Nothing cached yet: the normal embed path handles every variant, so there is nothing to fix up.
+  if (!selectOneVariant.get(candidate.productId, MODEL_ID, 'base')) return false;
+
+  const known = selectRefMeta.get(candidate.productId) as { is_landscape: number } | undefined;
+  if (known && known.is_landscape === 0) return false;                                  // portrait: base is the only orientation
+  if (known && selectOneVariant.get(candidate.productId, MODEL_ID, 'rot90')) return false; // landscape, already done
+
   try {
     const res = await fetch(candidate.imageUrl, { headers: { 'User-Agent': 'card-sorter-app/1.0' } });
-    if (!res.ok) return;
+    if (!res.ok) return false;
     const buf = Buffer.from(await res.arrayBuffer());
     const meta = await sharp(buf).metadata();
-    if ((meta.width ?? 0) <= (meta.height ?? 0)) return; // portrait — base is the only orientation
+    const isLandscape = (meta.width ?? 0) > (meta.height ?? 0);
+    upsertRefMeta.run({ productId: candidate.productId, isLandscape: isLandscape ? 1 : 0, checkedAt: Date.now() });
+    if (!isLandscape) return false;
+
+    let wrote = false;
     for (const [variant, angle] of Object.entries(ROTATIONS)) {
       if (selectOneVariant.get(candidate.productId, MODEL_ID, variant)) continue;
       const embedding = await embedImage(await sharp(buf).rotate(angle).toBuffer());
@@ -166,9 +192,12 @@ async function backfillRotations(candidate: CandidateCard): Promise<void> {
         embedding: JSON.stringify(embedding), fetchedAt: Date.now(),
       });
       console.log(`[embeddings] backfilled ${variant} for landscape reference ${candidate.productId} (${candidate.name})`);
+      wrote = true;
     }
+    return wrote;
   } catch (err) {
     console.warn(`[embeddings] rotation backfill failed for ${candidate.productId}:`, err instanceof Error ? err.message : err);
+    return false;
   }
 }
 
