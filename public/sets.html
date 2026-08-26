@@ -180,6 +180,30 @@
   ul.review .who .sub { color: var(--muted); font-size: 0.75rem; margin-top: 0.1rem; }
   .vs { color: var(--muted); font-size: 0.7rem; flex: none; }
 
+  /* Low-confidence review: the capture, then the two candidates it could not be separated
+     between. Laid out as a row of three images because the question being asked is purely
+     visual — "which of these two is the thing on the left" — and a name alone cannot answer it. */
+  ul.lowconf { list-style: none; }
+  ul.lowconf li {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+    padding: 0.7rem; margin-bottom: 0.6rem;
+  }
+  ul.lowconf .lc-head { display: flex; align-items: baseline; gap: 0.5rem; font-size: 0.78rem; color: var(--muted); margin-bottom: 0.5rem; }
+  ul.lowconf .lc-head .seq { color: var(--text); font-weight: 600; }
+  ul.lowconf .lc-gap { font-variant-numeric: tabular-nums; }
+  ul.lowconf .lc-row { display: flex; gap: 0.5rem; align-items: stretch; }
+  ul.lowconf .cand { flex: 1; min-width: 0; text-align: center; }
+  ul.lowconf .cand.capture { flex: 0 0 5.5rem; }
+  ul.lowconf img { width: 100%; border-radius: 6px; border: 1px solid var(--border); background: #000; display: block; }
+  ul.lowconf .cand .cname { font-size: 0.74rem; margin-top: 0.3rem; line-height: 1.25; overflow-wrap: anywhere; }
+  ul.lowconf .cand .cscore { font-size: 0.72rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+  ul.lowconf .cand .clabel { font-size: 0.66rem; text-transform: uppercase; letter-spacing: 0.03em; color: var(--muted); }
+  ul.lowconf .noimg { display: flex; align-items: center; justify-content: center;
+    aspect-ratio: 63 / 88; border: 1px dashed var(--border); border-radius: 6px;
+    color: var(--muted); font-size: 0.7rem; }
+  ul.lowconf .lc-ocr { font-family: ui-monospace, monospace; font-size: 0.72rem; color: var(--muted);
+    margin-top: 0.45rem; overflow-wrap: anywhere; }
+
   ol.filing { list-style: none; counter-reset: f; }
   ol.filing li {
     display: flex; gap: 0.6rem; align-items: center; padding: 0.55rem 0;
@@ -202,6 +226,7 @@
     <button data-view="run">Run</button>
     <button data-view="binder">Binder</button>
     <button data-view="missing">Missing</button>
+    <a class="nav-link" href="/runs.html">Runs</a>
     <a class="nav-link" href="/labels.html">Label samples</a>
     <a class="nav-link" href="/">← Sorter</a>
   </nav>
@@ -364,6 +389,10 @@
       <h2 style="margin-top:1.5rem;">Review</h2>
       <p class="hint">Your capture next to the card it was matched to. Tap <em>Wrong</em> on any mismatch — that un-fills the slot immediately, and drops the card from the filing list above.</p>
       <ul class="review" id="review-list"></ul>
+
+      <h2 style="margin-top:1.5rem;" id="lowconf-heading">Low confidence</h2>
+      <p class="hint">Captures the matcher could not call. Only the ones where a real candidate cleared the score threshold are shown — the gap between the top two was too small, not the match itself. These cards are in your <strong>extra</strong> pile; if you can tell which one it is, set it aside and re-run it.</p>
+      <ul class="lowconf" id="lowconf-list"></ul>
 
       <button class="primary" id="back-to-goals-btn">Back to goals</button>
     </div>
@@ -704,6 +733,7 @@
     await refreshGoalProgress();
     await renderFilingList();
     await renderReviewStrip();
+    await renderLowConfidence();
   }
 
   function setBanner(cls, text) {
@@ -938,6 +968,7 @@
     await refreshGoalProgress();
     await renderFilingList();
     await renderReviewStrip();
+    await renderLowConfidence();
   }
 
   async function refreshGoalProgress() {
@@ -983,6 +1014,125 @@
       return;
     }
     for (const e of entries) ul.appendChild(reviewRow(e));
+  }
+
+  // ═══════════════════════ LOW CONFIDENCE ══════════════════════
+
+  /**
+   * The "which of these two was it" list.
+   *
+   * Only rows where at least one candidate cleared minScore reach here — the server filters, so
+   * this never has to decide what is answerable. The three images are the whole point: the
+   * decision is visual, and showing two names with scores 0.004 apart is exactly the information
+   * that was already insufficient to make the call automatically.
+   */
+  async function renderLowConfidence() {
+    const ul = $('lowconf-list');
+    ul.innerHTML = '';
+    let entries;
+    try {
+      entries = await api('/api/goal-session/' + goalSession.id + '/low-confidence');
+    } catch (err) {
+      ul.innerHTML = '<li class="hint">Could not load low-confidence cards.</li>';
+      return;
+    }
+    $('lowconf-heading').textContent = entries.length
+      ? 'Low confidence (' + entries.length + ')'
+      : 'Low confidence';
+    if (entries.length === 0) {
+      ul.innerHTML = '<li class="hint">Nothing to review — every card was either matched confidently or nothing in the set resembled it.</li>';
+      return;
+    }
+    for (const e of entries) ul.appendChild(lowConfRow(e));
+  }
+
+  /** One candidate column: reference photo, name, number, score. */
+  function candCol(cand, label) {
+    const div = document.createElement('div');
+    div.className = 'cand';
+    if (cand.imageUrl) {
+      const img = document.createElement('img');
+      img.loading = 'lazy';
+      img.src = cand.imageUrl;
+      img.alt = cand.name || 'candidate';
+      div.appendChild(img);
+    } else {
+      const ph = document.createElement('div');
+      ph.className = 'noimg';
+      ph.textContent = 'no image';
+      div.appendChild(ph);
+    }
+    const l = document.createElement('div');
+    l.className = 'clabel';
+    l.textContent = label;
+    div.appendChild(l);
+    const n = document.createElement('div');
+    n.className = 'cname';
+    // textContent, not innerHTML — 30 card names in this set alone contain an ampersand.
+    n.textContent = cand.name || '(none)';
+    div.appendChild(n);
+    const sc = document.createElement('div');
+    sc.className = 'cscore';
+    sc.textContent = (cand.number ? cand.number + ' · ' : '')
+      + (cand.score != null ? cand.score.toFixed(3) : '—');
+    div.appendChild(sc);
+    return div;
+  }
+
+  function lowConfRow(entry) {
+    const li = document.createElement('li');
+
+    const head = document.createElement('div');
+    head.className = 'lc-head';
+    const seq = document.createElement('span');
+    seq.className = 'seq';
+    seq.textContent = '#' + entry.card.seq;
+    head.appendChild(seq);
+    const gap = document.createElement('span');
+    gap.className = 'lc-gap';
+    // The gap IS the reason this card is here, so it leads.
+    gap.textContent = entry.gap != null ? 'gap ' + entry.gap.toFixed(4) : 'no runner-up';
+    head.appendChild(gap);
+    li.appendChild(head);
+
+    const row = document.createElement('div');
+    row.className = 'lc-row';
+
+    const cap = document.createElement('div');
+    cap.className = 'cand capture';
+    if (entry.card.hasThumb) {
+      const img = document.createElement('img');
+      img.loading = 'lazy';
+      img.src = '/api/goal-card/' + entry.card.id + '/thumb';
+      img.alt = 'Your capture';
+      cap.appendChild(img);
+    } else {
+      // Only possible for rows scanned before thumbnails were kept for this outcome.
+      const ph = document.createElement('div');
+      ph.className = 'noimg';
+      ph.textContent = 'no capture';
+      cap.appendChild(ph);
+    }
+    const cl = document.createElement('div');
+    cl.className = 'clabel';
+    cl.textContent = 'scanned';
+    cap.appendChild(cl);
+    row.appendChild(cap);
+
+    row.appendChild(candCol(entry.top, 'best'));
+    row.appendChild(candCol(entry.runnerUp, 'runner-up'));
+    li.appendChild(row);
+
+    // What OCR read, when it read anything. On these rows it is often the fastest way to tell
+    // which candidate is right without squinting at the thumbnail.
+    if (entry.card.ocrRaw) {
+      const o = document.createElement('div');
+      o.className = 'lc-ocr';
+      o.textContent = 'OCR ' + (entry.card.ocrSim != null ? entry.card.ocrSim.toFixed(2) : '?')
+        + ': "' + entry.card.ocrRaw + '"';
+      li.appendChild(o);
+    }
+    return li;
   }
 
   function reviewRow(entry) {
@@ -1085,12 +1235,36 @@
 
   // ═══════════════════════ boot ═════════════════════════════════
 
+  /**
+   * Deep link from the run history page: /sets.html?review=<goalSessionId>.
+   *
+   * Reopens that run's done view and scrolls to the low-confidence list. Falls back to the normal
+   * goal list on any failure — a stale link (the run was deleted from the history page, which is
+   * exactly what that page is for) must not strand the user on a blank screen.
+   */
+  async function openReviewDeepLink(sessionId) {
+    const detail = await api('/api/goal-session/' + sessionId);
+    await selectGoal(detail.goal);
+    await openPastSession(detail.session);
+    $('lowconf-heading').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+
   (async function boot() {
     try {
       appSettings = await api('/api/settings');
       // This page has no settings editor — it reads once at boot. Volume/enabled changes are made
       // on the price-sorter page's Settings view and picked up here on next load.
       audio.configure(appSettings);
+      const review = new URLSearchParams(location.search).get('review');
+      if (review) {
+        try {
+          await openReviewDeepLink(review);
+          return;
+        } catch (err) {
+          // Deliberately swallowed into the normal path rather than surfaced as a page error.
+          console.warn('[sets] review deep link failed, falling back to goal list:', err);
+        }
+      }
       await loadGoals();
     } catch (err) {
       $('goal-list').innerHTML = `<li class="error-box">Failed to load: ${esc(err.message)}</li>`;

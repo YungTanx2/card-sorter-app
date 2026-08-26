@@ -1,0 +1,388 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+<title>Run History</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg: #0f1117;
+    --surface: #1a1d27;
+    --surface2: #222636;
+    --border: #2d3148;
+    --text: #e2e8f0;
+    --muted: #8892a4;
+    --accent: #6366f1;
+    --green: #22c55e;
+    --red: #ef4444;
+    --yellow: #eab308;
+  }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: var(--bg); color: var(--text); min-height: 100vh;
+    display: flex; flex-direction: column;
+  }
+
+  header {
+    display: flex; align-items: center; gap: 0.5rem; padding: 0.75rem 1rem;
+    background: var(--surface); border-bottom: 1px solid var(--border);
+    position: sticky; top: 0; z-index: 10;
+  }
+  header h1 { font-size: 1rem; font-weight: 600; margin-right: auto; }
+  header nav { display: flex; gap: 0.35rem; flex-wrap: wrap; }
+  header nav a.nav-link {
+    display: inline-flex; align-items: center; color: var(--accent); border: 1px solid var(--border);
+    border-radius: 6px; padding: 0.35rem 0.6rem; font-size: 0.8rem; text-decoration: none;
+  }
+
+  main { flex: 1; padding: 1rem; max-width: 720px; width: 100%; margin: 0 auto; }
+  h2 { font-size: 1.05rem; margin-bottom: 0.5rem; }
+
+  button.secondary {
+    background: var(--surface2); color: var(--text); border: 1px solid var(--border);
+    border-radius: 8px; padding: 0.5rem 0.8rem; font-size: 0.85rem; cursor: pointer;
+  }
+  button.danger { background: var(--red); color: white; border: none; }
+  button.confirm { background: var(--red); color: white; border: none; font-weight: 700; }
+  button:disabled { opacity: 0.5; cursor: default; }
+
+  .hint { font-size: 0.78rem; color: var(--muted); }
+  .error-box { background: #3a1a1a; border: 1px solid var(--red); color: #fca5a5;
+    border-radius: 8px; padding: 0.75rem; margin-bottom: 0.75rem; font-size: 0.85rem; }
+
+  .filters { display: flex; gap: 0.35rem; margin-bottom: 0.9rem; flex-wrap: wrap; }
+  .filters button { font-size: 0.8rem; }
+  .filters button[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
+
+  .run {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+    padding: 0.8rem; margin-bottom: 0.7rem;
+  }
+  .run-top { display: flex; align-items: baseline; gap: 0.5rem; flex-wrap: wrap; }
+  .run-title { font-weight: 600; font-size: 0.95rem; margin-right: auto; }
+  .run-when { font-size: 0.75rem; color: var(--muted); }
+
+  .badge {
+    font-size: 0.68rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em;
+    padding: 0.15rem 0.4rem; border-radius: 4px; border: 1px solid var(--border);
+    color: var(--muted); white-space: nowrap;
+  }
+  .badge.price { color: var(--yellow); border-color: var(--yellow); }
+  .badge.builder { color: var(--accent); border-color: var(--accent); }
+  .badge.dry { color: var(--muted); }
+  .badge.active { color: var(--green); border-color: var(--green); }
+
+  .stats { display: flex; gap: 0.9rem; margin-top: 0.5rem; flex-wrap: wrap; }
+  .stat { font-size: 0.78rem; color: var(--muted); }
+  .stat b { color: var(--text); font-variant-numeric: tabular-nums; }
+
+  .actions { display: flex; gap: 0.4rem; margin-top: 0.7rem; flex-wrap: wrap; align-items: center; }
+  .actions a.artifact {
+    display: inline-flex; align-items: center; color: var(--accent);
+    border: 1px solid var(--border); border-radius: 8px; padding: 0.5rem 0.8rem;
+    font-size: 0.85rem; text-decoration: none;
+  }
+  .actions .spacer { flex: 1; }
+
+  /* The destructive path is deliberately two-step and inline rather than a window.confirm():
+     the whole point is to SHOW what will be lost, and a native dialog cannot render counts. */
+  .confirm-box {
+    margin-top: 0.7rem; padding: 0.7rem; border-radius: 8px;
+    background: #3a1a1a; border: 1px solid var(--red); font-size: 0.85rem;
+  }
+  .confirm-box .warn { color: #fca5a5; margin-bottom: 0.6rem; line-height: 1.5; }
+  .confirm-box .warn b { color: #fff; }
+  .confirm-row { display: flex; gap: 0.4rem; }
+
+  .empty { color: var(--muted); font-size: 0.9rem; padding: 2rem 0; text-align: center; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Run History</h1>
+  <nav>
+    <a class="nav-link" href="/sets.html">Set Builder</a>
+    <a class="nav-link" href="/">Sorter</a>
+  </nav>
+</header>
+
+<main>
+  <div id="error" class="error-box" hidden></div>
+
+  <div class="filters">
+    <button class="secondary" data-filter="all" aria-pressed="true">All</button>
+    <button class="secondary" data-filter="set-builder" aria-pressed="false">Set Builder</button>
+    <button class="secondary" data-filter="price" aria-pressed="false">Price sorter</button>
+    <button class="secondary" data-filter="review" aria-pressed="false">Needs review</button>
+  </div>
+
+  <div id="list"></div>
+</main>
+
+<script>
+(function () {
+  'use strict';
+
+  var runs = [];
+  var filter = 'all';
+  /** id of the run whose delete confirmation is open — only ever one at a time, so an accidental
+   *  double-tap on a second row cannot arm two destructive actions at once. */
+  var confirming = null;
+
+  function $(id) { return document.getElementById(id); }
+
+  function showError(err) {
+    var el = $('error');
+    el.textContent = err && err.message ? err.message : String(err);
+    el.hidden = false;
+  }
+  function clearError() { $('error').hidden = true; }
+
+  function api(url, opts) {
+    return fetch(url, opts).then(function (res) {
+      return res.json().catch(function () { return {}; }).then(function (body) {
+        if (!res.ok) throw new Error(body.error || (res.status + ' ' + res.statusText));
+        return body;
+      });
+    });
+  }
+
+  function when(ms) {
+    var d = new Date(ms);
+    var today = new Date();
+    var sameDay = d.toDateString() === today.toDateString();
+    var time = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+    return sameDay ? 'Today ' + time : d.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ' ' + time;
+  }
+
+  function matches(run) {
+    if (filter === 'all') return true;
+    if (filter === 'review') return run.reviewable > 0;
+    return run.kind === filter;
+  }
+
+  /** Builds one run card. Everything is textContent or a built element — run titles carry goal
+   *  names and set names, which routinely contain & and quotes. */
+  function renderRun(run) {
+    var el = document.createElement('div');
+    el.className = 'run';
+
+    var top = document.createElement('div');
+    top.className = 'run-top';
+
+    var kind = document.createElement('span');
+    kind.className = 'badge ' + (run.kind === 'price' ? 'price' : 'builder');
+    kind.textContent = run.kind === 'price' ? 'sorter' : 'set builder';
+    top.appendChild(kind);
+
+    var title = document.createElement('span');
+    title.className = 'run-title';
+    title.textContent = run.title;
+    top.appendChild(title);
+
+    if (run.dryRun) {
+      var dry = document.createElement('span');
+      dry.className = 'badge dry';
+      dry.textContent = 'dry run';
+      top.appendChild(dry);
+    }
+    if (run.status === 'active') {
+      var act = document.createElement('span');
+      act.className = 'badge active';
+      act.textContent = 'active';
+      top.appendChild(act);
+    }
+
+    var w = document.createElement('span');
+    w.className = 'run-when';
+    w.textContent = when(run.createdAt);
+    top.appendChild(w);
+    el.appendChild(top);
+
+    var stats = document.createElement('div');
+    stats.className = 'stats';
+    run.stats.forEach(function (s) {
+      var d = document.createElement('span');
+      d.className = 'stat';
+      var b = document.createElement('b');
+      b.textContent = String(s.value);
+      d.appendChild(b);
+      d.appendChild(document.createTextNode(' ' + s.label));
+      stats.appendChild(d);
+    });
+    el.appendChild(stats);
+
+    var actions = document.createElement('div');
+    actions.className = 'actions';
+
+    run.artifacts.forEach(function (a) {
+      var link = document.createElement('a');
+      link.className = 'artifact';
+      link.href = a.href;
+      link.textContent = a.label;
+      // download rather than navigate, so a CSV does not replace the page on mobile
+      link.setAttribute('download', '');
+      actions.appendChild(link);
+    });
+
+    if (run.kind === 'set-builder' && run.reviewable > 0) {
+      var rev = document.createElement('a');
+      rev.className = 'artifact';
+      rev.href = '/sets.html?review=' + encodeURIComponent(run.id);
+      rev.textContent = 'Review ' + run.reviewable + ' low-confidence';
+      actions.appendChild(rev);
+    }
+
+    var spacer = document.createElement('span');
+    spacer.className = 'spacer';
+    actions.appendChild(spacer);
+
+    var del = document.createElement('button');
+    del.className = 'secondary danger';
+    del.textContent = 'Delete';
+    del.addEventListener('click', function () { openConfirm(run); });
+    actions.appendChild(del);
+    el.appendChild(actions);
+
+    if (confirming === run.id) el.appendChild(renderConfirm(run));
+    return el;
+  }
+
+  /**
+   * The confirmation, rendered inline once its impact is known.
+   *
+   * Deliberately fetches the impact rather than reusing the list's stats: the list is a snapshot
+   * from page load, and telling someone "this removes 12 slots" from stale data would be worse
+   * than saying nothing. The box shows a spinner state until the real numbers land.
+   */
+  function renderConfirm(run) {
+    var box = document.createElement('div');
+    box.className = 'confirm-box';
+
+    var warn = document.createElement('div');
+    warn.className = 'warn';
+    warn.textContent = 'Checking what this would remove…';
+    box.appendChild(warn);
+
+    var row = document.createElement('div');
+    row.className = 'confirm-row';
+    var yes = document.createElement('button');
+    yes.className = 'confirm';
+    yes.textContent = 'Delete permanently';
+    yes.disabled = true;
+    var no = document.createElement('button');
+    no.className = 'secondary';
+    no.textContent = 'Cancel';
+    no.addEventListener('click', function () { confirming = null; render(); });
+    row.appendChild(yes);
+    row.appendChild(no);
+    box.appendChild(row);
+
+    var base = run.kind === 'price' ? '/api/session/' : '/api/goal-session/';
+    api(base + run.id + '/deletion-impact').then(function (impact) {
+      if (confirming !== run.id) return;   // they cancelled while this was in flight
+      warn.textContent = '';
+      var lines = [];
+      if (run.kind === 'set-builder') {
+        lines.push('Permanently deletes ' + impact.totalCards + ' scan record'
+          + (impact.totalCards === 1 ? '' : 's')
+          + (impact.samples ? ' and ' + impact.samples + ' stored frame' + (impact.samples === 1 ? '' : 's') : '')
+          + '.');
+        if (impact.committedSlots > 0) {
+          // The consequence that is genuinely surprising: goal progress is derived from these
+          // rows, so removing them moves the goal backwards.
+          lines.push('This run filled ' + impact.committedSlots + ' slot'
+            + (impact.committedSlots === 1 ? '' : 's') + ' — deleting it will UN-FILL them and your goal progress will go down.');
+        } else {
+          lines.push('It filled no slots, so goal progress is unaffected.');
+        }
+      } else {
+        lines.push('Permanently deletes ' + impact.totalCards + ' scan record'
+          + (impact.totalCards === 1 ? '' : 's') + ' across ' + impact.bulkBoxes + ' bulk box'
+          + (impact.bulkBoxes === 1 ? '' : 'es') + '.');
+        if (impact.bulked > 0) {
+          lines.push('Those ' + impact.bulked + ' bulked card'
+            + (impact.bulked === 1 ? '' : 's') + ' will no longer be findable by name in bulk search.');
+        }
+      }
+      lines.push('Exported CSVs you already downloaded are unaffected. This cannot be undone.');
+
+      lines.forEach(function (t, i) {
+        var p = document.createElement('div');
+        if (i === 1 && run.kind === 'set-builder' && impact.committedSlots > 0) {
+          var b = document.createElement('b');
+          b.textContent = t;
+          p.appendChild(b);
+        } else {
+          p.textContent = t;
+        }
+        warn.appendChild(p);
+      });
+      yes.disabled = false;
+    }).catch(function (err) {
+      warn.textContent = 'Could not check impact: ' + err.message + ' — not deleting.';
+    });
+
+    yes.addEventListener('click', function () {
+      yes.disabled = true;
+      yes.textContent = 'Deleting…';
+      api(base + run.id, { method: 'DELETE' }).then(function () {
+        confirming = null;
+        return load();
+      }).catch(function (err) {
+        showError(err);
+        yes.disabled = false;
+        yes.textContent = 'Delete permanently';
+      });
+    });
+
+    return box;
+  }
+
+  function render() {
+    var list = $('list');
+    list.textContent = '';
+    var shown = runs.filter(matches);
+    if (shown.length === 0) {
+      var e = document.createElement('div');
+      e.className = 'empty';
+      e.textContent = runs.length === 0 ? 'No runs yet.' : 'No runs match this filter.';
+      list.appendChild(e);
+      return;
+    }
+    shown.forEach(function (r) { list.appendChild(renderRun(r)); });
+  }
+
+  function load() {
+    return api('/api/runs').then(function (data) {
+      runs = data;
+      clearError();
+      render();
+    }).catch(showError);
+  }
+
+  Array.prototype.forEach.call(document.querySelectorAll('.filters button'), function (btn) {
+    btn.addEventListener('click', function () {
+      filter = btn.getAttribute('data-filter');
+      confirming = null;
+      Array.prototype.forEach.call(document.querySelectorAll('.filters button'), function (b) {
+        b.setAttribute('aria-pressed', String(b === btn));
+      });
+      render();
+    });
+  });
+
+  function openConfirm(run) {
+    confirming = confirming === run.id ? null : run.id;
+    render();
+  }
+
+  load();
+})();
+</script>
+</body>
+</html>

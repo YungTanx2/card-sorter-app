@@ -81,6 +81,77 @@ export function getSession(id: string): Session | undefined {
   return row ? toSession(row) : undefined;
 }
 
+/** Every price-sorter run, newest first — the run history page's left half. */
+export function listSessions(): Session[] {
+  return (db.prepare('SELECT * FROM sessions ORDER BY created_at DESC').all() as SessionRow[])
+    .map(toSession);
+}
+
+export interface SessionSummary {
+  session: Session;
+  total: number;
+  keepers: number;
+  bulked: number;
+  bulkBoxes: number;
+}
+
+/** Every price-sorter run with the counts the run list shows — see the note in
+ *  listAllGoalSessionSummaries() on why these are grouped queries rather than per-run ones. */
+export function listSessionSummaries(): SessionSummary[] {
+  const tally = (sql: string) => {
+    const m = new Map<string, number>();
+    for (const r of db.prepare(sql).all() as { k: string; n: number }[]) m.set(r.k, r.n);
+    return m;
+  };
+  const total = tally('SELECT session_id AS k, COUNT(*) AS n FROM cards GROUP BY k');
+  const keepers = tally("SELECT session_id AS k, COUNT(*) AS n FROM cards WHERE decision = 'keeper' GROUP BY k");
+  const bulked = tally("SELECT session_id AS k, COUNT(*) AS n FROM cards WHERE decision = 'bulk' GROUP BY k");
+  const boxes = tally('SELECT session_id AS k, COUNT(*) AS n FROM bulk_boxes GROUP BY k');
+  return listSessions().map((session) => ({
+    session,
+    total: total.get(session.id) ?? 0,
+    keepers: keepers.get(session.id) ?? 0,
+    bulked: bulked.get(session.id) ?? 0,
+    bulkBoxes: boxes.get(session.id) ?? 0,
+  }));
+}
+
+/**
+ * What deleting a price-sorter run would cost.
+ *
+ * Unlike Set Builder, nothing here is derived from the rows — a price run's output is the CSV you
+ * already exported, and the bulk-box search index. So the honest warning is about SEARCHABILITY:
+ * deleting the run is what makes its bulked cards unfindable by name, which is the one thing the
+ * bulk pile is for (see searchBulkCards).
+ */
+export function getSessionDeletionImpact(id: string): {
+  totalCards: number; keepers: number; bulked: number; bulkBoxes: number;
+} {
+  const one = (sql: string) => (db.prepare(sql).get(id) as { n: number }).n;
+  return {
+    totalCards: one('SELECT COUNT(*) AS n FROM cards WHERE session_id = ?'),
+    keepers: one("SELECT COUNT(*) AS n FROM cards WHERE session_id = ? AND decision = 'keeper'"),
+    bulked: one("SELECT COUNT(*) AS n FROM cards WHERE session_id = ? AND decision = 'bulk'"),
+    bulkBoxes: one('SELECT COUNT(*) AS n FROM bulk_boxes WHERE session_id = ?'),
+  };
+}
+
+/**
+ * Hard-deletes a price-sorter run: its cards, its bulk boxes, and the session row.
+ *
+ * cards before bulk_boxes because cards reference boxes; the session row last. Explicit rather
+ * than relying on REFERENCES, because this database does not enable PRAGMA foreign_keys — see
+ * db.ts and deleteGoal() in goals.ts, which this deliberately mirrors.
+ *
+ * Transactional so a failure part-way cannot leave bulk boxes claiming a card count for cards
+ * that no longer exist — the count is a stored column here, not a derived one.
+ */
+export const deleteSession = db.transaction((id: string) => {
+  db.prepare('DELETE FROM cards WHERE session_id = ?').run(id);
+  db.prepare('DELETE FROM bulk_boxes WHERE session_id = ?').run(id);
+  db.prepare('DELETE FROM sessions WHERE id = ?').run(id);
+});
+
 export function resumeSession(id: string): Session {
   updateSessionStatus.run('active', Date.now(), id);
   const s = getSession(id);

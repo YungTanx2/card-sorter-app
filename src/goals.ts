@@ -308,6 +308,113 @@ export function listGoalSessions(goalId: string): GoalSession[] {
   return (selectGoalSessionsForGoal.all(goalId) as GoalSessionRow[]).map(toGoalSession);
 }
 
+export interface GoalSessionSummary {
+  session: GoalSession;
+  goalName: string;
+  gameName: string;
+  /** Scans recorded, split by what the run actually did with them. */
+  total: number;
+  accepted: number;
+  lowConfidence: number;
+  /** Of the low-confidence rows, how many the end-of-run review would surface — i.e. how many are
+   *  answerable rather than hopeless. Zero here means the pile has nothing worth looking at. */
+  reviewable: number;
+  samples: number;
+}
+
+/**
+ * Every Set Builder run across every goal, newest first, with the counts the run list shows.
+ *
+ * One grouped query per statistic rather than N per run: a history page is the one screen that
+ * touches every row in the table, and the per-run aggregates this app uses elsewhere are only
+ * cheap because they run against a single session.
+ */
+export function listAllGoalSessionSummaries(): GoalSessionSummary[] {
+  const minScore = getSettings().minScore;
+  const rows = db.prepare(`
+    SELECT s.*, g.name AS goal_name, g.game_name AS game_name
+      FROM goal_sessions s JOIN goals g ON g.id = s.goal_id
+     ORDER BY s.created_at DESC
+  `).all() as (GoalSessionRow & { goal_name: string; game_name: string })[];
+
+  const tally = (sql: string, params: unknown[] = []) => {
+    const m = new Map<string, number>();
+    for (const r of db.prepare(sql).all(...params) as { k: string; n: number }[]) m.set(r.k, r.n);
+    return m;
+  };
+  const total = tally('SELECT goal_session_id AS k, COUNT(*) AS n FROM goal_cards GROUP BY k');
+  const accepted = tally("SELECT goal_session_id AS k, COUNT(*) AS n FROM goal_cards WHERE outcome = 'needed' AND voided = 0 GROUP BY k");
+  const lowConf = tally("SELECT goal_session_id AS k, COUNT(*) AS n FROM goal_cards WHERE reason = 'low-confidence' GROUP BY k");
+  // Same OR condition as isReviewableLowConfidence, expressed in SQL so the history page does not
+  // have to load every card row just to count them. Kept adjacent to that function on purpose —
+  // if one changes the other must too.
+  const reviewable = tally(
+    `SELECT goal_session_id AS k, COUNT(*) AS n FROM goal_cards
+      WHERE reason = 'low-confidence' AND voided = 0 AND (score >= ? OR runner_up_score >= ?)
+      GROUP BY k`, [minScore, minScore]);
+  const samples = tally(`SELECT c.goal_session_id AS k, COUNT(*) AS n
+      FROM capture_samples s JOIN goal_cards c ON c.id = s.goal_card_id GROUP BY k`);
+
+  return rows.map((r) => ({
+    session: toGoalSession(r),
+    goalName: r.goal_name,
+    gameName: r.game_name,
+    total: total.get(r.id) ?? 0,
+    accepted: accepted.get(r.id) ?? 0,
+    lowConfidence: lowConf.get(r.id) ?? 0,
+    reviewable: reviewable.get(r.id) ?? 0,
+    samples: samples.get(r.id) ?? 0,
+  }));
+}
+
+/**
+ * What deleting a run would cost, so the confirm can state it instead of the user discovering it.
+ *
+ * Set Builder progress is DERIVED from goal_cards (see getOwnedCounts) — there is no counter. So
+ * deleting a committed run does not merely tidy a list, it un-fills every slot that run filled.
+ * That is correct behaviour, and it is also exactly the kind of consequence a generic "are you
+ * sure?" hides. A dry run reports 0 here, which is what makes it obviously safe to remove.
+ */
+export function getGoalSessionDeletionImpact(id: string): {
+  totalCards: number; committedSlots: number; samples: number;
+} {
+  const totalCards = (db.prepare('SELECT COUNT(*) AS n FROM goal_cards WHERE goal_session_id = ?')
+    .get(id) as { n: number }).n;
+  // Mirrors getOwnedCounts's filter exactly — anything it counts is a slot that will un-fill.
+  const committedSlots = (db.prepare(`
+    SELECT COUNT(*) AS n FROM goal_cards
+     WHERE goal_session_id = ? AND outcome = 'needed' AND voided = 0 AND counts_toward_goal = 1
+       AND product_id IS NOT NULL`).get(id) as { n: number }).n;
+  const samples = (db.prepare(`
+    SELECT COUNT(*) AS n FROM capture_samples
+     WHERE goal_card_id IN (SELECT id FROM goal_cards WHERE goal_session_id = ?)`)
+    .get(id) as { n: number }).n;
+  return { totalCards, committedSlots, samples };
+}
+
+/**
+ * Hard-deletes ONE run and everything recorded during it, leaving the goal itself intact.
+ *
+ * Same manual-cascade discipline as deleteGoal(), and for the same reason: PRAGMA foreign_keys is
+ * off, so a REFERENCES clause cascades nothing and a partial delete silently orphans rows that no
+ * screen can ever surface again. Order matters — labels hang off sample ids, samples off card ids.
+ *
+ * Transactional because goal_cards rows ARE the goal's progress. A half-finished delete would
+ * leave the goal reporting a slot count that matches neither the old state nor the new one.
+ *
+ * Deliberately does NOT touch goal_adjustments: those are manual corrections the operator entered
+ * by hand, not scan output, and they have no relationship to which run was open at the time.
+ */
+export const deleteGoalSession = db.transaction((id: string) => {
+  db.prepare(`DELETE FROM capture_labels WHERE capture_sample_id IN
+    (SELECT s.id FROM capture_samples s JOIN goal_cards c ON c.id = s.goal_card_id
+      WHERE c.goal_session_id = ?)`).run(id);
+  db.prepare(`DELETE FROM capture_samples WHERE goal_card_id IN
+    (SELECT id FROM goal_cards WHERE goal_session_id = ?)`).run(id);
+  db.prepare('DELETE FROM goal_cards WHERE goal_session_id = ?').run(id);
+  db.prepare('DELETE FROM goal_sessions WHERE id = ?').run(id);
+});
+
 export function resumeGoalSession(id: string): GoalSession {
   updateGoalSessionStatus.run('active', Date.now(), id);
   const s = getGoalSession(id);
@@ -517,7 +624,13 @@ export async function scanGoalCard(goalSessionId: string, imageBuffer: Buffer): 
   if (fused.productId == null) {
     // Log the best guess anyway so the run's manifest is diagnosable, but never act on it.
     const guess = top ? candidates.find((c) => c.productId === top!.productId) ?? null : null;
-    return record('extra', 'low-confidence', guess, top?.score ?? null, false);
+    // A thumbnail IS stored here, unlike every other 'extra' path. These are the rows the
+    // end-of-run review shows, and a review of unidentified cards without a picture of the card
+    // is useless — the whole task is "look at it and tell me which of these two it was".
+    // Deliberately not extended to the other extras: 'not-a-card' has nothing worth looking at,
+    // and 'slot-filled'/'excluded-rarity' were identified confidently, so there is nothing to
+    // adjudicate. See isReviewableLowConfidence() for which of these rows actually surface.
+    return record('extra', 'low-confidence', guess, top?.score ?? null, true);
   }
 
   const identifiedId = fused.productId;
@@ -712,6 +825,81 @@ export function getReviewStrip(goalSessionId: string): ReviewEntry[] {
     .map((card) => ({
       card,
       referenceImageUrl: card.productId != null ? byId.get(card.productId)?.imageUrl ?? null : null,
+    }));
+}
+
+export interface LowConfidenceCandidate {
+  productId: number | null;
+  name: string | null;
+  number: string | null;
+  score: number | null;
+  imageUrl: string | null;
+}
+
+export interface LowConfidenceEntry {
+  card: GoalCard;
+  /** The two candidates that were too close to separate — the actual subject of the review. */
+  top: LowConfidenceCandidate;
+  runnerUp: LowConfidenceCandidate;
+  /** score - runnerUpScore. Null when either side is missing. The number that failed minGap. */
+  gap: number | null;
+}
+
+/**
+ * Predicate for "worth a human look" among low-confidence rows.
+ *
+ * A run's low-confidence pile mixes two very different failures, and only one of them is
+ * reviewable. If at least one candidate cleared minScore, the model DID find a plausible card and
+ * was merely unable to separate it from the next one — a person looking at the photo can usually
+ * settle that in a second. If neither cleared it, nothing in the pool resembled the capture, so
+ * there is no question to answer; showing those rows would bury the answerable ones.
+ *
+ * Deliberately OR rather than AND: a top that clears minScore while its runner-up sits below is
+ * still a near-miss the gap rejected, and it is the easiest case of all to adjudicate.
+ */
+function isReviewableLowConfidence(card: GoalCard, minScore: number): boolean {
+  if (card.reason !== 'low-confidence' || card.voided) return false;
+  return (card.score != null && card.score >= minScore)
+    || (card.runnerUpScore != null && card.runnerUpScore >= minScore);
+}
+
+/**
+ * The end-of-run "which of these two was it" list.
+ *
+ * Pairs each reviewable low-confidence capture with BOTH candidates and their reference photos,
+ * because the decision being asked for is a three-way visual comparison and a name alone does not
+ * support it. The capture's own thumbnail comes from goal_cards.thumb_jpeg, which scanGoalCard
+ * now stores for this outcome specifically.
+ */
+export function getLowConfidenceReview(goalSessionId: string): LowConfidenceEntry[] {
+  const session = getGoalSession(goalSessionId);
+  if (!session) throw new Error(`Goal session ${goalSessionId} not found`);
+  const goal = getGoal(session.goalId)!;
+  const minScore = getSettings().minScore;
+  // Unscoped for the same reason as getReviewStrip: this resolves historical rows, and narrowing
+  // by the current variant would blank the image of the very rows worth reviewing.
+  const byId = new Map(getCandidatesForSets(goal.setIds).map((c) => [c.productId, c]));
+
+  const look = (productId: number | null, name: string | null, score: number | null): LowConfidenceCandidate => {
+    const c = productId != null ? byId.get(productId) : undefined;
+    return {
+      productId,
+      // Prefer the catalog's current name, but fall back to what was stamped on the row so a
+      // product that has since left the pool still reads as something.
+      name: c?.name ?? name,
+      number: c?.number ?? null,
+      score,
+      imageUrl: c?.imageUrl ?? null,
+    };
+  };
+
+  return getGoalCardsForSession(goalSessionId)
+    .filter((c) => isReviewableLowConfidence(c, minScore))
+    .map((card) => ({
+      card,
+      top: look(card.productId, card.name, card.score),
+      runnerUp: look(card.runnerUpProductId, card.runnerUpName, card.runnerUpScore),
+      gap: card.score != null && card.runnerUpScore != null ? card.score - card.runnerUpScore : null,
     }));
 }
 
