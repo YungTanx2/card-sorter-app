@@ -448,6 +448,19 @@ export interface AppSettings {
    *  re-arms while the tone is still sounding — the pages guard this, but keep it sane anyway. */
   toneDurationMs: number;
   /**
+   * Fade in/out of a `tones` cue, in ms.
+   *
+   * A setting rather than a constant because it is a detection parameter, not a cosmetic one, and
+   * this rig has now refuted three tone recommendations — retuning must not need a deploy.
+   *
+   * Raised from a hardcoded 25ms to 60ms after the machine was observed misreading the accept cue
+   * as reject specifically when it reacted EARLY. A slower fade radiates less onset transient and
+   * delays the point at which the cue is loud enough to trigger a detector at all, so the detector
+   * is more likely to be measuring steady state. Works alongside keeping both tones clear of the
+   * speaker resonance band — see audio.js resonanceRisk().
+   */
+  toneRampMs: number;
+  /**
    * How long a decision is held — banner shown, cue ringing — before the rig re-arms for the
    * next card. Was a duplicated hardcoded 700ms in both mode pages; it becomes a real setting
    * here because Phase 2 makes it the window the X1PRO has to hear a tone and route, which is a

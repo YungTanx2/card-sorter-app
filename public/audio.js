@@ -28,8 +28,8 @@ window.CardSorterAudio = (function () {
 
   const DEFAULTS = {
     soundEnabled: true, soundVolume: 0.6, soundPack: 'machine',
-    // Defaults for the "tones" pack — see TONES below for why these two numbers.
-    toneAcceptHz: 1477, toneRejectHz: 941, toneDurationMs: 600,
+    // Defaults for the "tones" pack — see TONES and resonanceRisk() below for why these numbers.
+    toneAcceptHz: 2175, toneRejectHz: 1175, toneDurationMs: 600, toneRampMs: 60,
   };
 
   // The vendor's tones, extracted and verified byte-for-byte against the source page.
@@ -43,7 +43,7 @@ window.CardSorterAudio = (function () {
    * the wrong pack can be told apart from a device running stale cached JS — the two look
    * identical from the outside, and chasing the wrong one costs a deploy cycle each time.
    */
-  const BUILD = '2026-08-18-offline-decode';
+  const BUILD = '2026-08-26-resonance-clear';
 
   let ctx = null;
   let master = null;
@@ -236,6 +236,9 @@ window.CardSorterAudio = (function () {
     if (Number.isFinite(settings.toneAcceptHz)) config.toneAcceptHz = clamp(settings.toneAcceptHz, 300, 5000);
     if (Number.isFinite(settings.toneRejectHz)) config.toneRejectHz = clamp(settings.toneRejectHz, 300, 5000);
     if (Number.isFinite(settings.toneDurationMs)) config.toneDurationMs = clamp(settings.toneDurationMs, 120, 3000);
+    // Upper bound is a third of the tone so a long ramp can never eat the steady-state section
+    // the detector is supposed to measure; steadyTone() clamps again for the same reason.
+    if (Number.isFinite(settings.toneRampMs)) config.toneRampMs = clamp(settings.toneRampMs, 5, 250);
     if (master) master.gain.value = config.soundVolume;
   }
 
@@ -405,8 +408,8 @@ window.CardSorterAudio = (function () {
    * one mistake that is easy to make when retuning.
    */
   const TONES = {
-    accept: function (c, t) { return steadyTone(c, config.toneAcceptHz, t, config.toneDurationMs / 1000, 0.5, 0.025); },
-    reject: function (c, t) { return steadyTone(c, config.toneRejectHz, t, config.toneDurationMs / 1000, 0.5, 0.025); },
+    accept: function (c, t) { return steadyTone(c, config.toneAcceptHz, t, config.toneDurationMs / 1000, 0.5, config.toneRampMs / 1000); },
+    reject: function (c, t) { return steadyTone(c, config.toneRejectHz, t, config.toneDurationMs / 1000, 0.5, config.toneRampMs / 1000); },
   };
 
   const PACKS = ['machine', 'synth', 'tones'];
@@ -418,6 +421,32 @@ window.CardSorterAudio = (function () {
    * Encoded rather than left to judgement because this is exactly the trap the vendor pair fell
    * into, and it is invisible until a machine refuses to learn the pair.
    */
+  /**
+   * Flags a tone sitting in the phone micro-speaker's mechanical resonance band.
+   *
+   * WHY THIS EXISTS — it is the check whose absence caused the 941Hz reject tone to be
+   * misdetected. harmonicRisk() compares the two tones to EACH OTHER, but the speaker itself is a
+   * third frequency in the system, and neither tone was ever checked against it.
+   *
+   * A micro-speaker driven from rest does not instantly radiate a pure sine. The cone accelerates,
+   * and that onset transient rings near the driver's resonance (~600-900Hz) regardless of which
+   * frequency was requested. So EVERY cue begins with a burst of energy in that band. Put a cue
+   * there and the machine's detector, if it latches early, hears the transient rather than the
+   * tone — and it hears it on both cues.
+   *
+   * The observed symptom was exactly this and, tellingly, ASYMMETRIC: accept was misheard as
+   * reject, never the reverse, because the transient always resembles the low tone no matter which
+   * cue is playing. A "the tones are too close together" fault would fail in both directions.
+   *
+   * 1000Hz rather than 900 as the floor: the resonance has a skirt, and the point is to keep cues
+   * clear of it rather than to sit just outside.
+   */
+  function resonanceRisk(hz) {
+    if (hz >= 1000) return null;
+    return Math.round(hz) + 'Hz is in the speaker resonance band (~600-900Hz) — the onset '
+      + 'transient of every cue rings here, so an early-latching detector hears this tone on BOTH cues';
+  }
+
   function harmonicRisk(a, b) {
     const lo = Math.min(a, b);
     const hi = Math.max(a, b);
@@ -563,15 +592,19 @@ window.CardSorterAudio = (function () {
     play: play,
     packFor: packFor,
     harmonicRisk: harmonicRisk,
+    resonanceRisk: resonanceRisk,
     toneConfig: function () {
       return {
         pack: config.soundPack,
         acceptHz: config.toneAcceptHz,
         rejectHz: config.toneRejectHz,
         durationMs: config.toneDurationMs,
+        rampMs: config.toneRampMs,
         ratio: Math.round((Math.max(config.toneAcceptHz, config.toneRejectHz)
           / Math.min(config.toneAcceptHz, config.toneRejectHz)) * 1000) / 1000,
         risk: harmonicRisk(config.toneAcceptHz, config.toneRejectHz),
+        // Reported per cue: unlike harmonics, this is a property of ONE frequency, not the pair.
+        resonance: resonanceRisk(config.toneRejectHz) || resonanceRisk(config.toneAcceptHz),
       };
     },
     PACKS: PACKS,

@@ -444,11 +444,16 @@
       'accept     ' + t.acceptHz + ' Hz',
       'reject     ' + t.rejectHz + ' Hz',
       'duration   ' + t.durationMs + ' ms',
+      'ramp       ' + t.rampMs + ' ms',
       'ratio      ' + t.ratio,
       'harmonics  ' + (t.risk ? 'RISK - ' + t.risk : 'safe - no simple integer ratio'),
+      // Two independent failure modes, so two lines. Harmonics is about the tones relative to
+      // each other; resonance is about either tone relative to the speaker itself, and a pair can
+      // pass the first while failing the second — which is exactly how 941/1477 shipped.
+      'resonance  ' + (t.resonance ? 'RISK - ' + t.resonance : 'safe - both cues clear of ~600-900Hz'),
     ];
     el.textContent = lines.join(String.fromCharCode(10));
-    el.style.color = t.risk && t.pack === 'tones' ? 'var(--red)' : '';
+    el.style.color = (t.risk || t.resonance) && t.pack === 'tones' ? 'var(--red)' : '';
   }
 
   // ═══════════════════════ SETUP ═══════════════════════════════
