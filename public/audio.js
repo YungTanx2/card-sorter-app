@@ -29,7 +29,7 @@ window.CardSorterAudio = (function () {
   const DEFAULTS = {
     soundEnabled: true, soundVolume: 0.6, soundPack: 'machine',
     // Defaults for the "tones" pack — see TONES and resonanceRisk() below for why these numbers.
-    toneAcceptHz: 2175, toneRejectHz: 1175, toneDurationMs: 600, toneRampMs: 60,
+    toneAcceptHz: 1750, toneRejectHz: 1100, toneDurationMs: 600, toneRampMs: 60,
   };
 
   // The vendor's tones, extracted and verified byte-for-byte against the source page.

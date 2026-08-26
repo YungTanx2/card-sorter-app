@@ -69,14 +69,14 @@ console.log('\nresonanceRisk — a cue must not sit in the speaker resonance ban
   check('852Hz is flagged', !!A.resonanceRisk(852));
   check('999Hz is flagged (just inside)', !!A.resonanceRisk(999));
   check('1000Hz is clear (boundary is inclusive-above)', !A.resonanceRisk(1000));
-  check('1175Hz reject default is clear', !A.resonanceRisk(1175));
-  check('2175Hz accept default is clear', !A.resonanceRisk(2175));
+  check('1100Hz reject default is clear', !A.resonanceRisk(1100));
+  check('1750Hz accept default is clear', !A.resonanceRisk(1750));
 }
 
 console.log('\nharmonicRisk — the two cues must not be a simple integer ratio of each other');
 {
   const A = load();
-  check('1175/2175 defaults are harmonically clear', !A.harmonicRisk(1175, 2175));
+  check('1100/1750 defaults are harmonically clear', !A.harmonicRisk(1100, 1750));
   check('1000/2000 (the vendor pair) is caught as an octave', !!A.harmonicRisk(1000, 2000));
   check('1200/1800 is caught as 3:2', !!A.harmonicRisk(1200, 1800));
   // The point of having BOTH checks: the old pair passes this one and fails the other.
@@ -90,7 +90,7 @@ console.log('\ntoneRampMs actually reaches the scheduled envelope');
     const log = [];
     const A = load(log);
     A.configure({ soundEnabled: true, soundVolume: 1, soundPack: 'tones',
-      toneAcceptHz: 2175, toneRejectHz: 1175, toneDurationMs: 600, toneRampMs: ramp });
+      toneAcceptHz: 1750, toneRejectHz: 1100, toneDurationMs: 600, toneRampMs: ramp });
     A.play('accept');
     const freq = log.find(e => e[0] === 'freq');
     const up = log.find(e => e[0] === 'ramp');
@@ -106,15 +106,15 @@ console.log('\nplayed frequency follows configuration');
   const log = [];
   const A = load(log);
   A.configure({ soundEnabled: true, soundVolume: 1, soundPack: 'tones',
-    toneAcceptHz: 2175, toneRejectHz: 1175, toneDurationMs: 600, toneRampMs: 60 });
+    toneAcceptHz: 1750, toneRejectHz: 1100, toneDurationMs: 600, toneRampMs: 60 });
   A.play('accept');
-  check('accept plays toneAcceptHz', log.some(e => e[0] === 'freq' && e[1] === 2175));
+  check('accept plays toneAcceptHz', log.some(e => e[0] === 'freq' && e[1] === 1750));
   const log2 = [];
   const B = load(log2);
   B.configure({ soundEnabled: true, soundVolume: 1, soundPack: 'tones',
-    toneAcceptHz: 2175, toneRejectHz: 1175, toneDurationMs: 600, toneRampMs: 60 });
+    toneAcceptHz: 1750, toneRejectHz: 1100, toneDurationMs: 600, toneRampMs: 60 });
   B.play('reject');
-  check('reject plays toneRejectHz', log2.some(e => e[0] === 'freq' && e[1] === 1175));
+  check('reject plays toneRejectHz', log2.some(e => e[0] === 'freq' && e[1] === 1100));
 }
 
 console.log('\nclamping — a bad setting must not produce an unplayable cue');
@@ -136,7 +136,7 @@ console.log('\ntoneConfig reports both risks separately');
   check('old pair reports NO harmonic risk', !t.risk);
   check('old pair DOES report a resonance risk', !!t.resonance);
   const B = load();
-  B.configure({ soundPack: 'tones', toneAcceptHz: 2175, toneRejectHz: 1175 });
+  B.configure({ soundPack: 'tones', toneAcceptHz: 1750, toneRejectHz: 1100 });
   const u = B.toneConfig();
   check('new defaults report neither risk', !u.risk && !u.resonance);
   check('rampMs is surfaced for the Sound check panel', typeof u.rampMs === 'number');
