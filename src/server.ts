@@ -12,6 +12,7 @@ import {
   createSession, getSession, resumeSession, completeSession,
   openBulkBox, getBulkBoxesForSession, getCardsForSession,
   scanCard, searchBulkCards,
+  listSessionSummaries, deleteSession, getSessionDeletionImpact,
 } from './session';
 import {
   createGoal, getGoal, listGoals, completeGoal, deleteGoal, getGoalProgress, getMissingList, adjustGoal,
@@ -19,6 +20,8 @@ import {
   saveCaptureSample, getCaptureSamples, getCaptureSampleFrame, fetchRaritySlotCounts,
   scanGoalCard, getGoalCardsForSession, getGoalCardThumb, setGoalCardVoid,
   getReviewStrip, getFilingList,
+  listAllGoalSessionSummaries, deleteGoalSession, getGoalSessionDeletionImpact,
+  getLowConfidenceReview,
   getCaptureSampleContext, saveCaptureLabel, CaptureLabelVerdict,
 } from './goals';
 import { buildKeeperCsv, buildManifestCsv } from './export';
@@ -575,6 +578,96 @@ app.get('/api/search', (req, res) => {
 });
 
 // ---- settings ----
+
+/**
+ * Unified run history across both modes.
+ *
+ * One endpoint rather than two because the page's job is chronological — "what did I run, and
+ * when" — and interleaving two independently-sorted lists client-side would put the burden of
+ * merging on every consumer. `kind` is what tells them apart.
+ *
+ * Artifact links are built here, not in the browser, so the page never has to encode which
+ * exports exist for which mode; adding one later is a server change only.
+ */
+app.get('/api/runs', (_req, res) => {
+  const price = listSessionSummaries().map((s) => ({
+    kind: 'price' as const,
+    id: s.session.id,
+    title: s.session.gameName + ' · ' + s.session.variant + ' · ' + s.session.condition,
+    status: s.session.status,
+    dryRun: false,
+    createdAt: s.session.createdAt,
+    updatedAt: s.session.updatedAt,
+    stats: [
+      { label: 'scanned', value: s.total },
+      { label: 'keepers', value: s.keepers },
+      { label: 'bulked', value: s.bulked },
+      { label: 'boxes', value: s.bulkBoxes },
+    ],
+    artifacts: [
+      { label: 'Keeper CSV', href: `/api/session/${s.session.id}/export.csv` },
+      { label: 'Manifest CSV', href: `/api/session/${s.session.id}/manifest.csv` },
+    ],
+    reviewable: 0,
+  }));
+
+  const builder = listAllGoalSessionSummaries().map((s) => ({
+    kind: 'set-builder' as const,
+    id: s.session.id,
+    title: s.goalName + ' · ' + s.gameName,
+    status: s.session.status,
+    dryRun: s.session.dryRun,
+    createdAt: s.session.createdAt,
+    updatedAt: s.session.updatedAt,
+    stats: [
+      { label: 'scanned', value: s.total },
+      { label: 'accepted', value: s.accepted },
+      { label: 'low-conf', value: s.lowConfidence },
+      { label: 'frames', value: s.samples },
+    ],
+    artifacts: [
+      { label: 'Filing list', href: `/api/goal-session/${s.session.id}/filing-list` },
+    ],
+    // Drives the "N to review" affordance — see getLowConfidenceReview.
+    reviewable: s.reviewable,
+  }));
+
+  res.json([...price, ...builder].sort((a, b) => b.createdAt - a.createdAt));
+});
+
+/** Deletion cost for a run, so the confirm can state consequences rather than ask blindly. */
+app.get('/api/session/:id/deletion-impact', (req, res) => {
+  if (!requireSession(req, res)) return;
+  res.json(getSessionDeletionImpact(req.params.id));
+});
+
+app.get('/api/goal-session/:id/deletion-impact', (req, res) => {
+  if (!requireGoalSession(req, res)) return;
+  res.json(getGoalSessionDeletionImpact(req.params.id));
+});
+
+/** Permanent. Both handlers cascade by hand — foreign_keys is off; see db.ts. */
+app.delete('/api/session/:id', (req, res) => {
+  if (!requireSession(req, res)) return;
+  const impact = getSessionDeletionImpact(req.params.id);
+  deleteSession(req.params.id);
+  res.json({ deleted: req.params.id, ...impact });
+});
+
+app.delete('/api/goal-session/:id', (req, res) => {
+  if (!requireGoalSession(req, res)) return;
+  // Captured BEFORE the delete: afterwards the rows are gone and the response could not say what
+  // it removed, which is the one thing worth reporting about an irreversible action.
+  const impact = getGoalSessionDeletionImpact(req.params.id);
+  deleteGoalSession(req.params.id);
+  res.json({ deleted: req.params.id, ...impact });
+});
+
+/** End-of-run review: low-confidence captures where at least one candidate cleared minScore. */
+app.get('/api/goal-session/:id/low-confidence', (req, res) => {
+  if (!requireGoalSession(req, res)) return;
+  res.json(getLowConfidenceReview(req.params.id));
+});
 
 app.get('/api/settings', (_req, res) => {
   res.json(getSettings());
