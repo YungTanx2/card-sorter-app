@@ -442,19 +442,19 @@
     const t = audio.toneConfig();
     const lines = [
       'pack       ' + t.pack,
-      'accept     ' + t.acceptHz + ' Hz',
-      'reject     ' + t.rejectHz + ' Hz',
-      'duration   ' + t.durationMs + ' ms',
-      'ramp       ' + t.rampMs + ' ms',
+      'accept     ' + t.acceptHz + ' Hz  gain ' + t.acceptGain + '  ' + t.acceptMs + ' ms',
+      'reject     ' + t.rejectHz + ' Hz  gain ' + t.rejectGain + '  ' + t.rejectMs + ' ms',
       'ratio      ' + t.ratio,
       'harmonics  ' + (t.risk ? 'RISK - ' + t.risk : 'safe - no simple integer ratio'),
-      // Two independent failure modes, so two lines. Harmonics is about the tones relative to
-      // each other; resonance is about either tone relative to the speaker itself, and a pair can
-      // pass the first while failing the second — which is exactly how 941/1477 shipped.
-      'resonance  ' + (t.resonance ? 'RISK - ' + t.resonance : 'safe - both cues clear of ~600-900Hz'),
+      // THREE independent failure modes, so three lines, and a config can pass any two while
+      // failing the third. Harmonics is the tones relative to each other; resonance is either tone
+      // relative to the speaker's own ringing; level is whether each tone arrives loud enough to
+      // be heard at all. The last is the one this rig actually keeps failing.
+      'resonance  ' + (t.resonance ? 'RISK - ' + t.resonance : 'safe - onset clear of ~600-900Hz'),
+      'level      ' + (t.level ? 'RISK - ' + t.level : 'safe - the higher cue is the louder one'),
     ];
     el.textContent = lines.join(String.fromCharCode(10));
-    el.style.color = (t.risk || t.resonance) && t.pack === 'tones' ? 'var(--red)' : '';
+    el.style.color = (t.risk || t.resonance || t.level) && t.pack === 'tones' ? 'var(--red)' : '';
   }
 
   // ═══════════════════════ SETUP ═══════════════════════════════

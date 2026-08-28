@@ -28,10 +28,14 @@ window.CardSorterAudio = (function () {
 
   const DEFAULTS = {
     soundEnabled: true, soundVolume: 0.6, soundPack: 'machine',
-    // Defaults for the "tones" pack — see TONES and resonanceRisk() below for why these numbers.
-    // 941/1477 is the ONE pair Sound Learn has ever accepted on this rig; 80ms is a real 80ms
-    // now that the fade is a raised cosine rather than an exponential.
-    toneAcceptHz: 1477, toneRejectHz: 941, toneDurationMs: 600, toneRampMs: 80,
+    // Defaults for the "tones" pack — see TONES, resonanceRisk() and levelRisk() for the numbers.
+    // 941/1477 is the ONE pair Sound Learn has ever accepted on this rig; 80ms is a real 80ms now
+    // that the fade is a raised cosine. ACCEPT IS THE LOWER TONE ON PURPOSE — see levelRisk().
+    toneAcceptHz: 941, toneRejectHz: 1477, toneDurationMs: 600, toneRampMs: 80,
+    // Per-cue level and length, because the speaker's output is not flat and the two cues do not
+    // arrive at the machine's microphone equally loud even though they leave here equally loud.
+    toneAcceptGain: 0.40, toneRejectGain: 0.80,
+    toneAcceptMs: 600, toneRejectMs: 600,
   };
 
   // The vendor's tones, extracted and verified byte-for-byte against the source page.
@@ -45,7 +49,7 @@ window.CardSorterAudio = (function () {
    * the wrong pack can be told apart from a device running stale cached JS — the two look
    * identical from the outside, and chasing the wrong one costs a deploy cycle each time.
    */
-  const BUILD = '2026-08-27-raised-cosine';
+  const BUILD = '2026-08-27-per-cue-level';
 
   let ctx = null;
   let master = null;
@@ -238,6 +242,12 @@ window.CardSorterAudio = (function () {
     if (Number.isFinite(settings.toneAcceptHz)) config.toneAcceptHz = clamp(settings.toneAcceptHz, 300, 5000);
     if (Number.isFinite(settings.toneRejectHz)) config.toneRejectHz = clamp(settings.toneRejectHz, 300, 5000);
     if (Number.isFinite(settings.toneDurationMs)) config.toneDurationMs = clamp(settings.toneDurationMs, 120, 3000);
+    if (Number.isFinite(settings.toneAcceptMs)) config.toneAcceptMs = clamp(settings.toneAcceptMs, 120, 3000);
+    if (Number.isFinite(settings.toneRejectMs)) config.toneRejectMs = clamp(settings.toneRejectMs, 120, 3000);
+    // Floor of 0.05 rather than 0: a cue trimmed to silence is a card the machine never routes,
+    // and it would look identical to the audio being broken.
+    if (Number.isFinite(settings.toneAcceptGain)) config.toneAcceptGain = clamp(settings.toneAcceptGain, 0.05, 1);
+    if (Number.isFinite(settings.toneRejectGain)) config.toneRejectGain = clamp(settings.toneRejectGain, 0.05, 1);
     // Upper bound is a third of the tone so a long ramp can never eat the steady-state section
     // the detector is supposed to measure; steadyTone() clamps again for the same reason.
     if (Number.isFinite(settings.toneRampMs)) config.toneRampMs = clamp(settings.toneRampMs, 5, 250);
@@ -409,9 +419,26 @@ window.CardSorterAudio = (function () {
    * refuted by this rig, so retuning must not require a deploy. harmonicRisk() below guards the
    * one mistake that is easy to make when retuning.
    */
+  /** Per-cue length, falling back to the shared toneDurationMs when no override is set. */
+  function cueSeconds(cue) {
+    const per = cue === 'accept' ? config.toneAcceptMs : config.toneRejectMs;
+    return (Number.isFinite(per) && per > 0 ? per : config.toneDurationMs) / 1000;
+  }
+
+  /** Per-cue level. See levelRisk() for why these are not equal. */
+  function cueGain(cue) {
+    return cue === 'accept' ? config.toneAcceptGain : config.toneRejectGain;
+  }
+
   const TONES = {
-    accept: function (c, t) { return steadyTone(c, config.toneAcceptHz, t, config.toneDurationMs / 1000, 0.5, config.toneRampMs / 1000); },
-    reject: function (c, t) { return steadyTone(c, config.toneRejectHz, t, config.toneDurationMs / 1000, 0.5, config.toneRampMs / 1000); },
+    accept: function (c, t) {
+      return steadyTone(c, config.toneAcceptHz, t, cueSeconds('accept'), cueGain('accept'),
+        config.toneRampMs / 1000);
+    },
+    reject: function (c, t) {
+      return steadyTone(c, config.toneRejectHz, t, cueSeconds('reject'), cueGain('reject'),
+        config.toneRampMs / 1000);
+    },
   };
 
   const PACKS = ['machine', 'synth', 'tones'];
@@ -474,6 +501,57 @@ window.CardSorterAudio = (function () {
       + (Number.isFinite(rampMs) ? Math.round(rampMs) + 'ms' : 'current')
       + ' onset is too abrupt to suppress the transient — an early-latching detector will hear '
       + 'this tone on BOTH cues. Raise toneRampMs to at least ' + RESONANCE_SAFE_RAMP_MS + 'ms.';
+  }
+
+  /**
+   * Flags a configuration where the HIGHER-frequency cue is not the louder one.
+   *
+   * ═══ THE THIRD GUARD, AND THE ONE THE RIG ACTUALLY NEEDED ═══
+   *
+   * harmonicRisk() asks whether the two cues can be told apart. resonanceRisk() asks whether the
+   * onset is clean. Neither asks the question that every observed failure has actually turned on:
+   * IS EACH CUE LOUD ENOUGH AT THE MICROPHONE TO BE DETECTED AT ALL?
+   *
+   * The full failure record on this rig, over five configurations:
+   *
+   *     accept  reject   teaches?   in-run
+   *      2000    1000      no         -
+   *      1750    1100      no         -
+   *      1750    1100      no         -        (ramp 25 as well as 60)
+   *      1477     941     yes        occasional dropout on the ACCEPT cue
+   *      1477     941     yes        occasional dropout on the ACCEPT cue  (80ms raised cosine)
+   *
+   * Every failure, teaching and detection alike, is a failure to hear the HIGH tone. Nothing has
+   * ever gone wrong with the low one, and the in-run error has never once gone the other way. A
+   * "the two tones are too similar" fault would be symmetric; this is not a discrimination problem
+   * at all, it is a detectability problem on one specific cue. That is why four rounds of
+   * frequency-pair tuning changed nothing: separation was never the variable.
+   *
+   * Four effects all push the same direction:
+   *   - a micro-speaker's output falls off steeply above its resonance, and 941Hz sits IN that
+   *     resonance while 1477Hz is well past it;
+   *   - 941Hz's harmonics (1882, 2823Hz) land in-band, giving it a rich spectral signature, while
+   *     1477Hz's (2954, 4431Hz) are at or past the edge of what the speaker radiates — the high cue
+   *     arrives as a lone thin peak;
+   *   - a cheap electret mic with AGC rolls off high too;
+   *   - so an unsure detector falls toward the better-characterised template, which is always 941.
+   *
+   * The compensation is per-cue GAIN, and it belongs to the FREQUENCY, not to the semantic cue.
+   * Swap which tone carries which decision and the gains must swap with them, or the boost lands on
+   * the cue that never needed it. That mistake is invisible from the settings screen, which is why
+   * it is a guard rather than a comment.
+   */
+  function levelRisk(acceptHz, acceptGain, rejectHz, rejectGain) {
+    if (acceptHz === rejectHz) return null;
+    const acceptIsHigh = acceptHz > rejectHz;
+    const highGain = acceptIsHigh ? acceptGain : rejectGain;
+    const lowGain = acceptIsHigh ? rejectGain : acceptGain;
+    if (!Number.isFinite(highGain) || !Number.isFinite(lowGain)) return null;
+    if (highGain > lowGain) return null;
+    return 'the higher cue (' + Math.round(acceptIsHigh ? acceptHz : rejectHz) + 'Hz, '
+      + (acceptIsHigh ? 'accept' : 'reject') + ') is at gain ' + highGain + ' but the lower one is '
+      + 'at ' + lowGain + ' — the speaker radiates less as frequency rises, so the high cue reaches '
+      + 'the machine weakest and is the one it drops. Give the higher tone the higher gain.';
   }
 
   function harmonicRisk(a, b) {
@@ -706,6 +784,7 @@ window.CardSorterAudio = (function () {
     packFor: packFor,
     harmonicRisk: harmonicRisk,
     resonanceRisk: resonanceRisk,
+    levelRisk: levelRisk,
     toneConfig: function () {
       return {
         pack: config.soundPack,
@@ -713,6 +792,14 @@ window.CardSorterAudio = (function () {
         rejectHz: config.toneRejectHz,
         durationMs: config.toneDurationMs,
         rampMs: config.toneRampMs,
+        acceptGain: config.toneAcceptGain,
+        rejectGain: config.toneRejectGain,
+        acceptMs: Math.round(cueSeconds('accept') * 1000),
+        rejectMs: Math.round(cueSeconds('reject') * 1000),
+        // The guard that matters on this rig: every failure so far has been the high cue arriving
+        // too weak, never the two cues being confusable.
+        level: levelRisk(config.toneAcceptHz, config.toneAcceptGain,
+          config.toneRejectHz, config.toneRejectGain),
         ratio: Math.round((Math.max(config.toneAcceptHz, config.toneRejectHz)
           / Math.min(config.toneAcceptHz, config.toneRejectHz)) * 1000) / 1000,
         risk: harmonicRisk(config.toneAcceptHz, config.toneRejectHz),

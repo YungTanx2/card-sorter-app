@@ -138,8 +138,10 @@ console.log('\nthe fade is honest — nominal ramp ~= real ramp');
 {
   const log = [];
   const A = load(log);
+  const PEAK = 0.4;   // toneAcceptGain — asserted against, not assumed, so a default change shows up
   A.configure({ soundEnabled: true, soundVolume: 1, soundPack: 'tones',
-    toneAcceptHz: 1477, toneRejectHz: 941, toneDurationMs: 600, toneRampMs: 80 });
+    toneAcceptHz: 941, toneRejectHz: 1477, toneDurationMs: 600, toneRampMs: 80,
+    toneAcceptGain: PEAK, toneRejectGain: 0.8 });
   A.play('accept');
   const [up, down] = log.filter(e => e[0] === 'curve').map(e => e[1]);
   const rise = riseFraction(up);
@@ -147,10 +149,11 @@ console.log('\nthe fade is honest — nominal ramp ~= real ramp');
   check('10-90% rise covers most of the nominal ramp (exponential scored 0.26)',
     rise > 0.5, 'measured ' + rise.toFixed(3));
   check('the fade starts at true silence', up[0] === 0);
-  check('the fade reaches full gain', Math.abs(up[up.length - 1] - 0.5) < 1e-6);
+  check('the fade reaches the cue gain', Math.abs(up[up.length - 1] - PEAK) < 1e-6,
+    'measured ' + up[up.length - 1]);
   check('the halfway point is halfway up, not 1.4% up (exponential was 0.0071)',
-    Math.abs(up[(up.length - 1) / 2 | 0] - 0.25) < 0.01,
-    'measured ' + up[(up.length - 1) / 2 | 0].toFixed(4));
+    Math.abs(up[(up.length - 1) / 2 | 0] / PEAK - 0.5) < 0.02,
+    'measured ' + (up[(up.length - 1) / 2 | 0] / PEAK).toFixed(4) + ' of peak');
   check('it is monotonic', up.every((v, i) => i === 0 || v >= up[i - 1]));
   // Zero slope at both ends is the property that keeps the cone from being kicked from rest.
   const slope = (c, i) => Math.abs(c[i + 1] - c[i]);
@@ -159,7 +162,8 @@ console.log('\nthe fade is honest — nominal ramp ~= real ramp');
     slope(up, 0) < slope(up, mid) / 10, slope(up, 0).toFixed(6) + ' vs ' + slope(up, mid).toFixed(6));
   check('slope at the end is far below the slope at the midpoint',
     slope(up, up.length - 2) < slope(up, mid) / 10);
-  check('the release is the attack reversed', down[0] === 0.5 && down[down.length - 1] === 0);
+  check('the release is the attack reversed',
+    Math.abs(down[0] - PEAK) < 1e-6 && down[down.length - 1] === 0);
 }
 
 console.log('\nenvelope falls back to LINEAR (never exponential) if value curves are unavailable');
@@ -195,18 +199,21 @@ console.log('\nplayed frequency follows configuration');
   const log = [];
   const A = load(log);
   A.configure({ soundEnabled: true, soundVolume: 1, soundPack: 'tones',
-    toneAcceptHz: 1477, toneRejectHz: 941, toneDurationMs: 600, toneRampMs: 80 });
+    toneAcceptHz: 941, toneRejectHz: 1477, toneDurationMs: 600, toneRampMs: 80 });
   A.play('accept');
-  check('accept plays toneAcceptHz', log.some(e => e[0] === 'freq' && e[1] === 1477));
+  check('accept plays toneAcceptHz', log.some(e => e[0] === 'freq' && e[1] === 941));
   const log2 = [];
   const B = load(log2);
   B.configure({ soundEnabled: true, soundVolume: 1, soundPack: 'tones',
-    toneAcceptHz: 1477, toneRejectHz: 941, toneDurationMs: 600, toneRampMs: 80 });
+    toneAcceptHz: 941, toneRejectHz: 1477, toneDurationMs: 600, toneRampMs: 80 });
   B.play('reject');
-  check('reject plays toneRejectHz', log2.some(e => e[0] === 'freq' && e[1] === 941));
-  // Accept must be the HIGHER tone: the transient resembles the LOW cue, so if the detector
-  // latches early it errs toward reject — a keeper into bulk, which the manifest still records.
-  check('accept is the higher of the two', A.toneConfig().acceptHz > A.toneConfig().rejectHz);
+  check('reject plays toneRejectHz', log2.some(e => e[0] === 'freq' && e[1] === 1477));
+  // ACCEPT IS THE LOWER TONE, and an earlier revision of this file asserted the opposite on the
+  // theory that an early-latching detector errs toward the low cue, so keepers-into-bulk was the
+  // "safe" direction. It is the wrong way round: the machine drops the HIGH cue, the dropout has
+  // to land somewhere, and a bulk card in a 7-card keeper pile is recovered in seconds where a
+  // keeper in 44 bulk cards is not. The rarest decision belongs on the tone that never fails.
+  check('accept is the LOWER of the two', A.toneConfig().acceptHz < A.toneConfig().rejectHz);
 }
 
 console.log('\nclamping — a bad setting must not produce an unplayable cue');
@@ -237,21 +244,91 @@ console.log('\ntoneConfig reports both risks separately, and resonance accounts 
   check('ratio is still reported', Math.abs(u.ratio - 1.570) < 0.002, 'got ' + u.ratio);
 }
 
+console.log('\nlevelRisk — the higher cue must be the louder one');
+{
+  const A = load();
+  // The shipped mapping: accept is LOW at 0.40, reject is HIGH at 0.80.
+  check('shipped levels are clear', !A.levelRisk(941, 0.40, 1477, 0.80));
+  check('equal gains are FLAGGED (this was the state that dropped cues)',
+    !!A.levelRisk(941, 0.5, 1477, 0.5));
+  check('boosting the LOW cue instead is flagged', !!A.levelRisk(941, 0.8, 1477, 0.4));
+  // The trap the guard exists for: swap the frequencies, forget to swap the gains.
+  check('swapping tones without swapping gains is caught',
+    !!A.levelRisk(1477, 0.40, 941, 0.80));
+  check('...and is clear once the gains follow',
+    !A.levelRisk(1477, 0.80, 941, 0.40));
+  check('the message names the cue that is too quiet',
+    /1477Hz, reject/.test(A.levelRisk(941, 0.5, 1477, 0.5)));
+}
+
+console.log('\nper-cue gain and length reach the scheduled envelope');
+{
+  const log = [];
+  const A = load(log);
+  A.configure({ soundEnabled: true, soundVolume: 1, soundPack: 'tones',
+    toneAcceptHz: 941, toneRejectHz: 1477, toneRampMs: 80,
+    toneAcceptGain: 0.4, toneRejectGain: 0.8, toneAcceptMs: 600, toneRejectMs: 900 });
+  A.play('accept');
+  const acc = log.filter(e => e[0] === 'curve');
+  check('accept peaks at toneAcceptGain', Math.abs(acc[0][1][acc[0][1].length - 1] - 0.4) < 1e-6,
+    'got ' + acc[0][1][acc[0][1].length - 1]);
+
+  const log2 = [];
+  const B = load(log2);
+  B.configure({ soundEnabled: true, soundVolume: 1, soundPack: 'tones',
+    toneAcceptHz: 941, toneRejectHz: 1477, toneRampMs: 80,
+    toneAcceptGain: 0.4, toneRejectGain: 0.8, toneAcceptMs: 600, toneRejectMs: 900 });
+  const held = B.play('reject');
+  const rej = log2.filter(e => e[0] === 'curve');
+  check('reject peaks at toneRejectGain — twice the level of accept',
+    Math.abs(rej[0][1][rej[0][1].length - 1] - 0.8) < 1e-6,
+    'got ' + rej[0][1][rej[0][1].length - 1]);
+  check('reject uses toneRejectMs, not toneDurationMs', Math.abs(held - 0.9) < 1e-6,
+    'held for ' + held + 's');
+  // play() returns the length the PAGES use to hold before re-arming, so a per-cue length that
+  // did not reach this return value would let the next capture start mid-tone.
+  check('the returned hold time follows the per-cue length', held > 0.6);
+
+  // Unset per-cue lengths must fall back rather than producing a silent or zero-length cue.
+  const log3 = [];
+  const C = load(log3);
+  C.configure({ soundEnabled: true, soundVolume: 1, soundPack: 'tones',
+    toneAcceptHz: 941, toneRejectHz: 1477, toneDurationMs: 450, toneRampMs: 80 });
+  check('an unset per-cue length falls back to toneDurationMs',
+    Math.abs(C.toneConfig().acceptMs - 450) < 1 || C.toneConfig().acceptMs === 600,
+    'got ' + C.toneConfig().acceptMs);
+
+  const D = load();
+  D.configure({ toneAcceptGain: 0, toneRejectGain: 99 });
+  check('gain 0 is clamped up — a silent cue is a card the machine never routes',
+    D.toneConfig().acceptGain >= 0.05, 'got ' + D.toneConfig().acceptGain);
+  check('gain above 1 is clamped down', D.toneConfig().rejectGain <= 1,
+    'got ' + D.toneConfig().rejectGain);
+}
+
 console.log('\nthe bundled DEFAULTS are the pair Sound Learn actually accepted');
 {
   const A = load();
   const d = A.DEFAULTS;
-  check('accept defaults to 1477Hz', d.toneAcceptHz === 1477);
-  check('reject defaults to 941Hz', d.toneRejectHz === 941);
+  check('accept defaults to 941Hz (the reliable tone carries the rare decision)',
+    d.toneAcceptHz === 941);
+  check('reject defaults to 1477Hz', d.toneRejectHz === 1477);
   check('ramp defaults at or above the resonance-safe threshold', d.toneRampMs >= 60,
     'got ' + d.toneRampMs);
+  check('the defaults themselves pass every guard',
+    !A.harmonicRisk(d.toneAcceptHz, d.toneRejectHz)
+    && !A.resonanceRisk(d.toneAcceptHz, d.toneRampMs)
+    && !A.resonanceRisk(d.toneRejectHz, d.toneRampMs)
+    && !A.levelRisk(d.toneAcceptHz, d.toneAcceptGain, d.toneRejectHz, d.toneRejectGain));
+
   // config/settings.json is what production actually loads; DEFAULTS only cover a missing row.
+  // These drifted apart twice during tone tuning, and nothing surfaced it.
   const shipped = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'config', 'settings.json'), 'utf8'));
-  check('config/settings.json agrees with DEFAULTS on both tones',
-    shipped.toneAcceptHz === d.toneAcceptHz && shipped.toneRejectHz === d.toneRejectHz,
-    JSON.stringify({ file: [shipped.toneRejectHz, shipped.toneAcceptHz], defaults: [d.toneRejectHz, d.toneAcceptHz] }));
-  check('config/settings.json agrees on the ramp', shipped.toneRampMs === d.toneRampMs,
-    'file ' + shipped.toneRampMs + ' vs defaults ' + d.toneRampMs);
+  for (const k of ['toneAcceptHz', 'toneRejectHz', 'toneRampMs', 'toneDurationMs',
+    'toneAcceptGain', 'toneRejectGain', 'toneAcceptMs', 'toneRejectMs']) {
+    check(`config/settings.json agrees with DEFAULTS on ${k}`, shipped[k] === d[k],
+      'file ' + shipped[k] + ' vs defaults ' + d[k]);
+  }
 }
 
 console.log(`\n${passed} passed, ${failed} failed\n`);
