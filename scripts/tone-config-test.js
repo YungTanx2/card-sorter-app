@@ -1,10 +1,14 @@
 /**
- * Tests for the `tones` pack's detection parameters (public/audio.js).
+ * Tests for the cue packs in public/audio.js.
  *
  * Runs the real audio.js under a fake AudioContext that records the scheduled envelope, so these
  * assert what the machine would actually HEAR rather than what the config object holds. That
  * distinction matters: toneRampMs being stored correctly and toneRampMs reaching the oscillator
  * are different facts, and only the second one affects detection.
+ *
+ * Most of this covers the `tones` pack, which is the machine's control signal. The synth block at
+ * the end covers the decorative pack for one reason only: its cues play into the same room as the
+ * X1PRO's microphone, so their partials are a safety property even though nothing routes on them.
  *
  * Run: node scripts/tone-config-test.js
  */
@@ -44,7 +48,14 @@ function makeCtx(log) {
       };
     },
     createBuffer() { return { getChannelData: () => new Float32Array(1), duration: 1 }; },
-    createBufferSource() { return { buffer: null, connect() {}, start() {} }; },
+    createBufferSource() {
+      return { buffer: null, connect(n) { return n || sink; }, start() {}, stop() {} };
+    },
+    // Only the synth pack reaches this one, via burst(). It logs nothing: the noise layer has no
+    // frequency to assert on, and leaving it silent keeps the log one entry per oscillator.
+    createBiquadFilter() {
+      return { type: '', frequency: { value: 0 }, connect(n) { return n || sink; } };
+    },
     resume() { return Promise.resolve(); }, close() {},
   };
 }
@@ -329,6 +340,70 @@ console.log('\nthe bundled DEFAULTS are the pair Sound Learn actually accepted')
     check(`config/settings.json agrees with DEFAULTS on ${k}`, shipped[k] === d[k],
       'file ' + shipped[k] + ' vs defaults ' + d[k]);
   }
+}
+
+console.log('\nthe synth pack\u2019s gong \u2014 dark, inharmonic, and clear of the detection bands');
+{
+  const log = [];
+  const A = load(log);
+  A.configure({ soundEnabled: true, soundVolume: 1, soundPack: 'synth' });
+  const held = A.play('reject');
+
+  // voice() logs a contiguous run per oscillator: freq, set, ramp(peak), ramp(release), start.
+  // burst() contributes only set/ramp, so anchoring on 'freq' skips the noise layer cleanly.
+  const partials = [];
+  for (let i = 0; i < log.length; i++) {
+    if (log[i][0] !== 'freq') continue;
+    if (log[i + 2] && log[i + 2][0] === 'ramp') {
+      partials.push({ hz: log[i][1], at: log[i][2], peakAt: log[i + 2][2] });
+    }
+  }
+
+  check('the gong schedules 10 oscillators (7 modes + 3 detuned twins)', partials.length === 10,
+    'got ' + partials.length);
+
+  const hzs = partials.map((v) => v.hz).sort((a, b) => a - b);
+  check('the fundamental is G2, 98Hz', Math.abs(hzs[0] - 98) < 0.01, 'got ' + hzs[0]);
+  check('nothing reaches 700Hz \u2014 the cue is dark by construction',
+    hzs[hzs.length - 1] < 700, 'top partial ' + Math.round(hzs[hzs.length - 1]) + 'Hz');
+
+  // The reason that ceiling exists. Same rule the `done` cue documents: this plays into the same
+  // room as the X1PRO's microphone, so no decorative partial may sit near a frequency the machine
+  // listens for. The margin is far wider than harmonicRisk()'s 3% window because the guard here
+  // is against a detector latching onto the wrong thing, not against distortion products.
+  for (const band of [941, 1477]) {
+    const nearest = Math.min.apply(null, hzs.map((h) => Math.abs(h - band) / band));
+    check('every partial is >25% clear of the ' + band + 'Hz detection band', nearest > 0.25,
+      'nearest is ' + Math.round(nearest * 100) + '%');
+  }
+
+  // Inharmonicity is what separates a gong from an organ stop: an integer multiple of the
+  // fundamental fuses with it into one pitched note instead of a metallic sonority. This is the
+  // assertion that would catch someone "tidying" 2.07 into 2.00.
+  const modes = hzs.filter((h, i) => i === 0 || h / hzs[i - 1] > 1.02); // drop the detuned twins
+  const fused = modes.filter((h) => {
+    const r = h / 98;
+    return r > 1.5 && Math.abs(r - Math.round(r)) < 0.02;
+  });
+  check('no mode is an integer multiple of the fundamental', fused.length === 0,
+    'fused: ' + fused.map((h) => Math.round(h)).join(', '));
+
+  // The bloom is the identifying feature of a struck plate: the high modes swell in after the
+  // strike rather than starting at peak. Take it away and the same partials read as a bell.
+  const fund = partials.filter((v) => Math.abs(v.hz - 98) < 0.01)[0];
+  const top = partials.reduce((a, b) => (b.hz > a.hz ? b : a));
+  check('the fundamental peaks immediately (within 5ms of the strike)',
+    fund.peakAt - fund.at <= 0.005, 'took ' + Math.round((fund.peakAt - fund.at) * 1000) + 'ms');
+  check('the top mode blooms in at least 100ms later',
+    top.peakAt - top.at >= 0.10, 'took ' + Math.round((top.peakAt - top.at) * 1000) + 'ms');
+
+  // ToneEmitter waits max(toneSettleMs, returned + 150ms), so a cue reporting its full acoustic
+  // length would silently lengthen every bulk card — ~850ms x 250 cards. The gong's tail
+  // deliberately outlives the number it returns; what it must not outlive is the settle window.
+  const settleMs = JSON.parse(
+    fs.readFileSync(path.join(__dirname, '..', 'config', 'settings.json'), 'utf8')).toneSettleMs;
+  check('the reject cue does not lengthen the run loop', held * 1000 + 150 <= settleMs,
+    'cue ' + Math.round(held * 1000) + 'ms + 150 vs settle ' + settleMs + 'ms');
 }
 
 console.log(`\n${passed} passed, ${failed} failed\n`);

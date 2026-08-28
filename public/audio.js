@@ -9,7 +9,7 @@
  *                        pure 1000Hz sine, both ~0.6s, every other frequency <=4% of peak.
  *                        Exactly one octave apart with no harmonic clutter — about the easiest
  *                        pair a cheap mic plus threshold detector could be asked to separate.
- *   "synth"              Ka-ching / thunk, synthesized here. Nicer to listen to across a
+ *   "synth"              Ka-ching / low gong, synthesized here. Nicer to listen to across a
  *                        250-card pile, but NOT what the machine was taught.
  *
  * Which to use is a real decision, not a preference. In Phase 2 the tone stops being operator
@@ -49,7 +49,7 @@ window.CardSorterAudio = (function () {
    * the wrong pack can be told apart from a device running stale cached JS — the two look
    * identical from the outside, and chasing the wrong one costs a deploy cycle each time.
    */
-  const BUILD = '2026-08-27-per-cue-level';
+  const BUILD = '2026-08-28-gong-reject';
 
   let ctx = null;
   let master = null;
@@ -266,10 +266,20 @@ window.CardSorterAudio = (function () {
    *
    * `sweepTo` bends the pitch downward over `sweepTime`. That falling pitch is the entire
    * difference between "a low note" and "something hit the table".
+   *
+   * `attack` delays the peak. It defaults to that same 2ms click-guard, but gong() sets it as
+   * high as 180ms per partial, which is how a struck plate BLOOMS: the upper modes are barely
+   * present at the instant of contact and swell in afterwards as the strike energy couples into
+   * them. Note that the exponential rise is heavily back-loaded — scheduleFlatEnvelope() below
+   * measures it sitting at 1.4% of full amplitude halfway through — and here that is exactly the
+   * shape wanted, a partial that stays out of the way and then rushes in.
    */
   function voice(c, opts) {
     const at = opts.at;
     const decay = opts.decay;
+    // Never let the swell outlast the note it belongs to; a bloom longer than the decay would
+    // schedule the release before the peak and the partial would simply never sound.
+    const attack = Math.min(Math.max(opts.attack || 0.002, 0.002), decay * 0.6);
     const osc = c.createOscillator();
     const gain = c.createGain();
 
@@ -278,14 +288,14 @@ window.CardSorterAudio = (function () {
     if (opts.sweepTo) osc.frequency.exponentialRampToValueAtTime(opts.sweepTo, at + (opts.sweepTime || 0.06));
 
     gain.gain.setValueAtTime(0.0001, at);
-    gain.gain.exponentialRampToValueAtTime(Math.max(0.0002, opts.gain), at + 0.002);
-    gain.gain.exponentialRampToValueAtTime(0.0001, at + decay);
+    gain.gain.exponentialRampToValueAtTime(Math.max(0.0002, opts.gain), at + attack);
+    gain.gain.exponentialRampToValueAtTime(0.0001, at + attack + decay);
 
     osc.connect(gain).connect(master);
     osc.start(at);
     // Stop slightly past the envelope's end so the node is released rather than left running for
     // the life of the page — a 250-card run schedules a few thousand of these.
-    osc.stop(at + decay + 0.02);
+    osc.stop(at + attack + decay + 0.02);
   }
 
   /** A filtered burst of the shared noise buffer — the transient/impact layer. */
@@ -322,6 +332,73 @@ window.CardSorterAudio = (function () {
     voice(c, { type: 'sine', freq: fundamental * 5.40, gain: gain * 0.16, at: at, decay: decay * 0.35 });
   }
 
+  /**
+   * The gong's mode stack: [ratio, level, decay scale, bloom scale].
+   *
+   * A bell and a gong are both struck metal, so why not just call bell() an octave down? Because
+   * three partials is a bell and seven is a plate. bell()'s 2.76x / 5.40x pair is the classic
+   * minor-third BELL spectrum — sparse, and sparse enough that the ear locks onto a definite
+   * pitch. A gong is a large flat disc with many closely-spaced modes, so it reads as a
+   * *sonority* rather than a note, and thinning it out is what makes cheap synth gongs sound
+   * like doorbells.
+   *
+   * The ratios are deliberately irregular and deliberately NOT integers — 2.07 rather than 2.00,
+   * because a clean octave partial is what turns struck metal into an organ stop. Two of them
+   * (2.76x, 5.40x-adjacent) are inherited from bell() so the pack keeps a family resemblance.
+   *
+   * The bloom column is the identifying feature. On a real gong the high modes are almost absent
+   * at the instant of contact and swell in over the following fraction of a second as the strike
+   * energy couples upward through the plate. Take the bloom away and you have a bell; that one
+   * column is most of the difference.
+   *
+   * ═══ EVERY PARTIAL IS BELOW 700Hz, AND THAT IS A CONSTRAINT, NOT AN ACCIDENT ═══
+   *
+   * Same rule the `done` cue documents: this pack plays into the same room as the X1PRO's
+   * microphone, so nothing here may stray near a frequency the machine listens for. The top
+   * partial lands at 619Hz against an accept cue at 941Hz — a 34% margin, wider than the 3%
+   * window harmonicRisk() considers dangerous. `synth` is still a no-machine-listening pack for
+   * the reasons in the header, but a decorative cue should not be the thing that breaks that.
+   */
+  const GONG_MODES = [
+    // ratio  level  decay  bloom
+    [1.00,    1.00,  1.00,  0.00],
+    [1.52,    0.55,  0.72,  0.18],
+    [2.07,    0.42,  0.60,  0.30],
+    [2.76,    0.34,  0.48,  0.45],
+    [3.71,    0.24,  0.34,  0.65],
+    [4.86,    0.16,  0.24,  0.85],
+    [6.32,    0.10,  0.21,  1.00],
+  ];
+
+  /**
+   * How far the doubled partials are detuned, as a fraction. At these frequencies it produces
+   * beats of roughly 1-2Hz — about one slow pulse over the cue's life, which is the difference
+   * between metal and a synth pad. A real gong is never perfectly circular and its modes are
+   * never exactly degenerate; this is that asymmetry, faked.
+   */
+  const GONG_DETUNE = 0.007;
+
+  /** A struck gong. `decay` is the fundamental's ring; every mode scales off it. */
+  function gong(c, at, fundamental, gain, decay, bloom) {
+    for (let i = 0; i < GONG_MODES.length; i++) {
+      const ratio = GONG_MODES[i][0];
+      const level = GONG_MODES[i][1];
+      const hz = fundamental * ratio;
+      voice(c, {
+        type: 'sine', freq: hz, gain: gain * level, at: at,
+        decay: decay * GONG_MODES[i][2], attack: bloom * GONG_MODES[i][3],
+      });
+      // Doubling only the low-mid modes: up top the partials are quiet and short enough that a
+      // beat never completes, so the extra oscillators would cost nodes and buy nothing.
+      if (i >= 1 && i <= 3) {
+        voice(c, {
+          type: 'sine', freq: hz * (1 + GONG_DETUNE), gain: gain * level * 0.5, at: at,
+          decay: decay * GONG_MODES[i][2] * 0.85, attack: bloom * GONG_MODES[i][3],
+        });
+      }
+    }
+  }
+
   // ═══════════════════════ THE SYNTH PACK ═══════════════════════
   // Each returns its approximate duration in seconds. Times are relative to a scheduling anchor
   // `t`, never to "now" mid-function — reading currentTime repeatedly inside one cue would let
@@ -338,13 +415,59 @@ window.CardSorterAudio = (function () {
       return 0.80;
     },
 
-    /** THUNK — a lowpassed body-slap plus a triangle whose pitch collapses 165Hz -> 52Hz in
-     *  85ms. Deliberately dead and over fast: you'll hear this a few hundred times per pile, so
-     *  any ring or tail would be unbearable by card fifty. Its shortness is a feature. */
+    /**
+     * LOW GONG — a soft-mallet thud, then a G2 plate blooming underneath it.
+     *
+     * Replaces a 0.28s thunk, and the tradeoff is worth stating plainly: the thunk's whole design
+     * argument was that you hear this cue a few hundred times per pile, so anything with a tail
+     * would be unbearable by card fifty. A gong is nothing but tail. Three things keep it from
+     * becoming that:
+     *
+     *   - It is SHORT FOR A GONG. The fundamental rings 1.5s where a real one goes 20s, and the
+     *     bright modes are gone inside half a second, so what is left after ~0.6s is a quiet low
+     *     hum rather than a sound competing for attention.
+     *   - It is DARK. Everything is under 620Hz and most of the energy is under 300Hz, so it sits
+     *     in a band the ka-ching does not use at all. Alternating the two reads as two different
+     *     objects rather than two settings of one instrument.
+     *   - It is QUIET where it lasts. The long modes are the low ones and they carry the least
+     *     level, so the tail decays out of notice well before it decays into silence.
+     *
+     * ═══ WHY 98Hz WHEN THE HEADER SAYS THE SPEAKER DIES BELOW 300Hz ═══
+     *
+     * It does, and the fundamental will be largely inaudible on a phone. That is fine and is the
+     * reason for seven modes rather than three: 149, 203, 270 and 364Hz all radiate, they are
+     * spaced as the partials OF a 98Hz plate, and the ear supplies the missing fundamental from
+     * that spacing. The cue reads as low even on hardware that cannot produce the low note. On a
+     * laptop or a desk speaker the real 98Hz arrives too and it simply gets weightier.
+     *
+     * G2 also puts it exactly two octaves under the `done` cue's opening G4, so the pack has one
+     * tonal centre rather than three unrelated ones.
+     *
+     * ═══ THE RETURN VALUE IS SHORTER THAN THE SOUND, DELIBERATELY ═══
+     *
+     * ToneEmitter waits `max(toneSettleMs, returned + 150ms)` before re-arming, so this number
+     * directly lengthens the run loop — returning the true 1.5s acoustic length would add ~850ms
+     * to every bulk card, which is over three minutes on a 250-card pile, to protect a tail
+     * nothing is listening to. What must not be interrupted is the part that carries the
+     * DECISION, and that is over once the bloom has peaked and started down. So 0.65s, which is
+     * under the 800ms settle and therefore costs the loop nothing. The tail rings on into the
+     * next card's cue, which is what a gong does anyway.
+     *
+     * This is only safe because `synth` is a no-machine-listening pack (see the header). The
+     * tones pack returns its honest full length and must keep doing so.
+     */
     reject: function (c, t) {
-      burst(c, { at: t, gain: 0.22, decay: 0.06, filterType: 'lowpass', cutoff: 260 });
-      voice(c, { type: 'triangle', freq: 165, sweepTo: 52, sweepTime: 0.085, gain: 0.55, at: t, decay: 0.22 });
-      return 0.28;
+      // Soft mallet, not a stick: lowpassed hard and gone in 90ms. It exists to give the strike
+      // a physical contact point — without it the gong fades in and reads as a synth swell.
+      burst(c, { at: t, gain: 0.26, decay: 0.09, filterType: 'lowpass', cutoff: 420 });
+      // 0.28 against the ka-ching's 0.34-0.40 looks like the gong is louder than it is. It is
+      // not: equal-loudness contours mean a tone near 100Hz needs roughly 20dB more amplitude
+      // than one near 1kHz to be heard as equally loud, and the ka-ching lives at 1046/1568Hz
+      // where the ear is at its most sensitive. Matching the numbers would leave the gong
+      // sounding markedly weaker than the cue it alternates with. Most of the perceived level
+      // comes from the 203-476Hz modes, which need less compensation than the fundamental does.
+      gong(c, t, 98.00, 0.28, 1.50, 0.18); // G2
+      return 0.65;
     },
 
     /** ALERT — the run stalled and needs hands. Three alternating square pulses, and the only
