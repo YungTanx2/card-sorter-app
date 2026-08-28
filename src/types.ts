@@ -442,11 +442,42 @@ export interface AppSettings {
    * multiple of another. public/audio.js harmonicRisk() checks a pair and the Sound check panel
    * shows its verdict.
    */
+  /**
+   * ⚠ ACCEPT IS THE LOWER TONE (941Hz) AND REJECT THE HIGHER (1477Hz). That looks backwards and is
+   * deliberate. The high cue is the one this rig drops, and the machine only has two bins, so the
+   * dropout has to land SOMEWHERE — better that it puts a bulk card in the small keeper pile, which
+   * you check against the manifest in seconds, than a keeper into forty-odd bulk cards. It also
+   * puts the rarest and highest-stakes decision on the tone that has never once failed.
+   *
+   * Changing this mapping means re-teaching the machine via Sound Learn, and means swapping
+   * toneAcceptGain/toneRejectGain with it — see those.
+   */
   toneAcceptHz: number;
   toneRejectHz: number;
   /** How long each tone holds, in ms. Must be comfortably shorter than toneSettleMs, or the run
-   *  re-arms while the tone is still sounding — the pages guard this, but keep it sane anyway. */
+   *  re-arms while the tone is still sounding — the pages guard this, but keep it sane anyway.
+   *  Acts as the fallback for toneAcceptMs / toneRejectMs when those are unset. */
   toneDurationMs: number;
+  /**
+   * Per-cue level (0.05-1) and length (ms), because the speaker's response is NOT FLAT: the two
+   * cues leave here equally loud and arrive at the machine's microphone unequally loud.
+   *
+   * Every failure this rig has produced — five configurations, teaching and detection alike — has
+   * been a failure to hear the HIGHER tone, never the lower, and never the two being confused for
+   * each other in both directions. A micro-speaker's output falls off steeply above its resonance,
+   * the low tone's harmonics land in-band while the high tone's do not, and a cheap mic rolls off
+   * high as well; so an unsure detector always falls toward the low tone's richer template.
+   *
+   * ⚠ THESE COMPENSATE THE SPEAKER, SO THEY BELONG TO THE FREQUENCY, NOT TO THE DECISION. Swap
+   * which tone carries which decision and these must swap too, or the boost lands on the cue that
+   * never needed it. audio.js levelRisk() checks that invariant and the Sound check panel shows it.
+   *
+   * soundVolume is the master and moves both together; it cannot express the difference.
+   */
+  toneAcceptGain: number;
+  toneRejectGain: number;
+  toneAcceptMs: number;
+  toneRejectMs: number;
   /**
    * Fade in/out of a `tones` cue, in ms. The single most important detection parameter here.
    *
