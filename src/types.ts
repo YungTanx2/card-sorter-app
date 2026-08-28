@@ -424,9 +424,14 @@ export interface AppSettings {
    * both ~0.6s, everything else under 4% of peak — one octave apart with no harmonic clutter,
    * which is what makes them easy for a cheap mic and a threshold detector to tell apart.
    *
-   * `synth` plays the ka-ching/thunk generated in audio.js. Pleasanter over a 250-card pile, but
-   * NOT what the machine was taught — a decorative sound layered onto a control tone is how you
-   * make a naive detector misfire. Use it only while no machine is listening.
+   * `synth` plays the ka-ching / low gong generated in audio.js. Pleasanter over a 250-card
+   * pile, but NOT what the machine was taught — a decorative sound layered onto a control tone is
+   * how you make a naive detector misfire. Use it only while no machine is listening.
+   *
+   * The gong is a G2 plate with seven inharmonic modes, all of them under 620Hz. That ceiling is
+   * load-bearing for the same reason the `done` cue's is: these play into the same room as the
+   * X1PRO's microphone, so no decorative partial may sit near a frequency the machine listens
+   * for. `scripts/tone-config-test.js` asserts it.
    */
   soundPack: 'machine' | 'synth' | 'tones';
   /**
