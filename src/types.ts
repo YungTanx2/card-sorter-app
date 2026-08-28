@@ -448,16 +448,27 @@ export interface AppSettings {
    *  re-arms while the tone is still sounding — the pages guard this, but keep it sane anyway. */
   toneDurationMs: number;
   /**
-   * Fade in/out of a `tones` cue, in ms.
+   * Fade in/out of a `tones` cue, in ms. The single most important detection parameter here.
    *
-   * A setting rather than a constant because it is a detection parameter, not a cosmetic one, and
-   * this rig has now refuted three tone recommendations — retuning must not need a deploy.
+   * A setting rather than a constant because this rig has now refuted several tone
+   * recommendations, and retuning must not need a deploy.
    *
-   * Raised from a hardcoded 25ms to 60ms after the machine was observed misreading the accept cue
-   * as reject specifically when it reacted EARLY. A slower fade radiates less onset transient and
-   * delays the point at which the cue is loud enough to trigger a detector at all, so the detector
-   * is more likely to be measuring steady state. Works alongside keeping both tones clear of the
-   * speaker resonance band — see audio.js resonanceRisk().
+   * WHY IT MATTERS: the machine misreads the accept cue as reject specifically when it reacts
+   * EARLY. A gentle fade radiates less onset transient — the ~600-900Hz ring a speaker cone makes
+   * when accelerating from rest, which is IDENTICAL on both cues and therefore carries no
+   * information — and it delays the point at which the cue is loud enough to trigger a detector at
+   * all, so the detector is more likely to be measuring steady state.
+   *
+   * ⚠ THE VALUE ONLY MEANT WHAT IT SAYS FROM 2026-08-27 ONWARD. Until then audio.js faded with
+   * exponentialRampToValueAtTime over a 5000x range, which is so back-loaded that the effective
+   * 10-90% rise was about a QUARTER of the nominal figure (25ms -> 6.4ms, 60ms -> 15.5ms) with a
+   * peak slope 8.5x that of an equivalent linear fade. Raising this setting 25 -> 60 therefore
+   * bought ~9ms of real softening, which is why it appeared to do nothing. It is now a raised
+   * cosine, zero-slope at both ends. Any tuning history from before that date is not comparable.
+   *
+   * At >= 60ms the onset is taken to be gentle enough that a cue may sit INSIDE the resonance band
+   * — which is what lets the pair go back to 941/1477, the only pair Sound Learn has accepted.
+   * See audio.js resonanceRisk() for why avoiding the band was the wrong trade.
    */
   toneRampMs: number;
   /**

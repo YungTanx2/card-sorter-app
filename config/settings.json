@@ -25,10 +25,10 @@
   "soundEnabled": true,
   "soundVolume": 0.6,
   "soundPack": "tones",
-  "toneAcceptHz": 1750,
-  "toneRejectHz": 1100,
+  "toneAcceptHz": 1477,
+  "toneRejectHz": 941,
   "toneDurationMs": 600,
-  "toneRampMs": 60,
+  "toneRampMs": 80,
   "toneSettleMs": 800,
   "csvColumns": [
     {

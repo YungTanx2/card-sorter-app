@@ -29,7 +29,9 @@ window.CardSorterAudio = (function () {
   const DEFAULTS = {
     soundEnabled: true, soundVolume: 0.6, soundPack: 'machine',
     // Defaults for the "tones" pack — see TONES and resonanceRisk() below for why these numbers.
-    toneAcceptHz: 1750, toneRejectHz: 1100, toneDurationMs: 600, toneRampMs: 60,
+    // 941/1477 is the ONE pair Sound Learn has ever accepted on this rig; 80ms is a real 80ms
+    // now that the fade is a raised cosine rather than an exponential.
+    toneAcceptHz: 1477, toneRejectHz: 941, toneDurationMs: 600, toneRampMs: 80,
   };
 
   // The vendor's tones, extracted and verified byte-for-byte against the source page.
@@ -43,7 +45,7 @@ window.CardSorterAudio = (function () {
    * the wrong pack can be told apart from a device running stale cached JS — the two look
    * identical from the outside, and chasing the wrong one costs a deploy cycle each time.
    */
-  const BUILD = '2026-08-26-resonance-clear';
+  const BUILD = '2026-08-27-raised-cosine';
 
   let ctx = null;
   let master = null;
@@ -422,29 +424,56 @@ window.CardSorterAudio = (function () {
    * into, and it is invisible until a machine refuses to learn the pair.
    */
   /**
-   * Flags a tone sitting in the phone micro-speaker's mechanical resonance band.
-   *
-   * WHY THIS EXISTS — it is the check whose absence caused the 941Hz reject tone to be
-   * misdetected. harmonicRisk() compares the two tones to EACH OTHER, but the speaker itself is a
-   * third frequency in the system, and neither tone was ever checked against it.
-   *
-   * A micro-speaker driven from rest does not instantly radiate a pure sine. The cone accelerates,
-   * and that onset transient rings near the driver's resonance (~600-900Hz) regardless of which
-   * frequency was requested. So EVERY cue begins with a burst of energy in that band. Put a cue
-   * there and the machine's detector, if it latches early, hears the transient rather than the
-   * tone — and it hears it on both cues.
-   *
-   * The observed symptom was exactly this and, tellingly, ASYMMETRIC: accept was misheard as
-   * reject, never the reverse, because the transient always resembles the low tone no matter which
-   * cue is playing. A "the tones are too close together" fault would fail in both directions.
-   *
-   * 1000Hz rather than 900 as the floor: the resonance has a skirt, and the point is to keep cues
-   * clear of it rather than to sit just outside.
+   * A raised-cosine onset at least this long is taken to suppress the resonance transient, which
+   * makes a tone inside the band usable again. See resonanceRisk().
    */
-  function resonanceRisk(hz) {
+  const RESONANCE_SAFE_RAMP_MS = 60;
+
+  /**
+   * Flags a tone sitting in the phone micro-speaker's mechanical resonance band — but only when
+   * the onset is abrupt enough for that band to matter.
+   *
+   * WHY THIS EXISTS — harmonicRisk() compares the two tones to EACH OTHER, but the speaker is a
+   * third frequency in the system and neither tone was ever checked against it. A micro-speaker
+   * driven from rest does not instantly radiate a pure sine: the cone accelerates, and that onset
+   * transient rings near the driver's resonance (~600-900Hz) whatever frequency was requested. So
+   * every cue begins with a burst of energy in that band, and a detector that latches early hears
+   * the transient rather than the tone — on BOTH cues.
+   *
+   * The observed symptom matched, and was tellingly ASYMMETRIC: accept misheard as reject, never
+   * the reverse, because the transient resembles the low tone no matter which cue is playing. A
+   * "the two tones are too close together" fault would fail in both directions.
+   *
+   * ═══ WHY IT NOW DEPENDS ON THE RAMP ═══
+   *
+   * The first version of this guard flagged any cue below 1000Hz unconditionally, and that
+   * recommendation steered the rig OFF 941Hz. The Sound Learn results then said the opposite of
+   * what the guard assumed:
+   *
+   *     1000/2000   low tone at the band edge   REJECTED (also an octave — two faults)
+   *     941/1477    low tone INSIDE the band    ACCEPTED
+   *     1100/1750   low tone clear of the band  REJECTED
+   *
+   * The likeliest reading is that the band cuts both ways: resonance amplifies the low cue, which
+   * makes it loud and easy to CHARACTERISE at teaching time, while the same amplification is what
+   * contaminates the high cue's onset at detection time. One mechanism, both symptoms. Avoiding
+   * the band therefore trades teachability for something a gentle onset gives you for free.
+   *
+   * So the mitigation is the envelope, not the frequency, and the risk is conditional on it.
+   * The threshold assumes the raised-cosine envelope in scheduleFlatEnvelope() — under the old
+   * exponential ramp a nominal 60ms was an effective 15ms and would not have earned this pass.
+   * That is why the curve change and the return to 941/1477 shipped together.
+   *
+   * Called with no ramp, it assumes the worst and flags, so an unqualified frequency check keeps
+   * its old meaning.
+   */
+  function resonanceRisk(hz, rampMs) {
     if (hz >= 1000) return null;
-    return Math.round(hz) + 'Hz is in the speaker resonance band (~600-900Hz) — the onset '
-      + 'transient of every cue rings here, so an early-latching detector hears this tone on BOTH cues';
+    if (Number.isFinite(rampMs) && rampMs >= RESONANCE_SAFE_RAMP_MS) return null;
+    return Math.round(hz) + 'Hz is in the speaker resonance band (~600-900Hz) and the '
+      + (Number.isFinite(rampMs) ? Math.round(rampMs) + 'ms' : 'current')
+      + ' onset is too abrupt to suppress the transient — an early-latching detector will hear '
+      + 'this tone on BOTH cues. Raise toneRampMs to at least ' + RESONANCE_SAFE_RAMP_MS + 'ms.';
   }
 
   function harmonicRisk(a, b) {
@@ -465,14 +494,97 @@ window.CardSorterAudio = (function () {
   }
 
   /**
+   * Number of points in a fade curve. Web Audio interpolates LINEARLY between them, so this is
+   * how finely the smooth curve is approximated — at the 80ms default that is ~0.6ms per segment,
+   * far below anything a speaker cone can follow.
+   */
+  const RAMP_POINTS = 128;
+
+  /**
+   * A raised-cosine (Hann) fade from `from` to `to`, as a Web Audio value curve.
+   *
+   * Cached because gain is the same 0.5 on every cue, so a 250-card run reuses two arrays instead
+   * of allocating a few thousand.
+   */
+  const curveCache = {};
+  function raisedCosine(from, to) {
+    const key = from + '>' + to;
+    if (curveCache[key]) return curveCache[key];
+    const curve = new Float32Array(RAMP_POINTS);
+    for (let i = 0; i < RAMP_POINTS; i++) {
+      const x = i / (RAMP_POINTS - 1);
+      curve[i] = from + (to - from) * 0.5 * (1 - Math.cos(Math.PI * x));
+    }
+    curveCache[key] = curve;
+    return curve;
+  }
+
+  /**
+   * Schedules the flat-topped envelope: fade up over `r`, hold, fade down over `r`.
+   *
+   * ═══ WHY THIS IS A CURVE AND NOT exponentialRampToValueAtTime ═══
+   *
+   * It used to be an exponential ramp from 0.0001 to `gain`, and that quietly defeated the entire
+   * purpose of having a ramp setting. An exponential is violently back-loaded: over a factor of
+   * 5000 it sits at 1.4% of full amplitude at the ramp's HALFWAY point and then rushes. Measured
+   * on the shipped envelope:
+   *
+   *     nominal ramp   effective 10-90% rise   peak slope vs. an equivalent linear fade
+   *         25ms              6.4ms                        8.5x
+   *         60ms             15.5ms                        8.5x
+   *
+   * So `toneRampMs` was delivering about a quarter of the fade it advertised, and raising it
+   * 25 -> 60ms — a change made specifically to stop the machine latching onto the onset — bought
+   * only 9ms of real softening. Four tone-pair trials were spent tuning frequencies while the
+   * variable that actually governs the onset was throttled by a hardcoded curve type.
+   *
+   * A raised cosine has ZERO SLOPE AT BOTH ENDS, which is the property that matters: the speaker
+   * cone is never asked to accelerate from rest, so it has far less reason to ring at its own
+   * mechanical resonance (~600-900Hz). That ring is the same signal on BOTH cues — it belongs to
+   * the driver, not the tone — which is why an early-latching detector confuses them, and why the
+   * observed failure was asymmetric (accept heard as reject, never the reverse).
+   *
+   * Peak slope, gain 0.5: exponential@25ms 170/s, linear@25ms 20/s, raised-cosine@80ms 9.8/s.
+   *
+   * NOTE this is a hypothesis about hardware nobody here has put a microphone to. If the misroutes
+   * survive a genuinely gentle onset, the transient is not the mechanism and the next step is to
+   * record both cues off the phone speaker and look at the first 50ms rather than reason about it.
+   */
+  function scheduleFlatEnvelope(param, at, seconds, gain, r) {
+    // setValueCurveAtTime throws if two curves overlap on one param. steadyTone() clamps r to
+    // seconds/3, so the attack always ends before the release begins — but the two spans are
+    // scheduled adjacently here to keep that precondition visible in one place.
+    if (typeof param.setValueCurveAtTime === 'function') {
+      try {
+        param.setValueCurveAtTime(raisedCosine(0, gain), at, r);
+        param.setValueCurveAtTime(raisedCosine(gain, 0), at + seconds - r, r);
+        return 'curve';
+      } catch (err) {
+        // Half-scheduled automation would collide with the fallback below, so clear it first.
+        if (typeof param.cancelScheduledValues === 'function') {
+          try { param.cancelScheduledValues(at); } catch (e) { /* nothing more to do */ }
+        }
+        console.warn('[audio] value-curve envelope rejected, using a linear fade:',
+          err && err.message ? err.message : err);
+      }
+    }
+    // Linear, deliberately NOT exponential. It keeps a slope discontinuity at each corner, so it
+    // is the worse option — but it still honours `r` literally, which is the whole point.
+    param.setValueAtTime(0, at);
+    param.linearRampToValueAtTime(gain, at + r);
+    param.setValueAtTime(gain, at + seconds - r);
+    param.linearRampToValueAtTime(0, at + seconds);
+    return 'linear';
+  }
+
+  /**
    * A flat-topped tone, unlike voice()'s percussive decay — a detector integrating over a window
    * wants sustain, and the whole point of the tones pack is that every sampling instant measures
    * the same thing.
    *
-   * `ramp` is the fade in/out, and it is not cosmetic. Switching a sine on abruptly is a step
-   * discontinuity, which is broadband in the frequency domain — it sprays energy across the
-   * spectrum including wherever the OTHER cue lives. A 25ms ramp keeps the cue spectrally clean;
-   * 5ms is fine for the vendor-tone fallback, which only needs to be recognisable.
+   * The frequency is set once and never swept, so there is no pitch startup: sample one is already
+   * the requested tone. All of the "startup" lives in the amplitude envelope, which is why
+   * scheduleFlatEnvelope() carries the long explanation.
    */
   function steadyTone(c, hz, at, seconds, gain, ramp) {
     const r = Math.min(ramp || 0.005, seconds / 3);
@@ -480,10 +592,11 @@ window.CardSorterAudio = (function () {
     const g = c.createGain();
     osc.type = 'sine';
     osc.frequency.setValueAtTime(hz, at);
-    g.gain.setValueAtTime(0.0001, at);
-    g.gain.exponentialRampToValueAtTime(gain, at + r);
-    g.gain.setValueAtTime(gain, at + seconds - r);
-    g.gain.exponentialRampToValueAtTime(0.0001, at + seconds);
+    // A GainNode defaults to 1. The oscillator does not start until `at` and the envelope takes
+    // over at the same instant, but leaving the default in place means any scheduling slop is a
+    // full-volume click rather than silence.
+    g.gain.value = 0;
+    scheduleFlatEnvelope(g.gain, at, seconds, gain, r);
     osc.connect(g).connect(master);
     osc.start(at);
     osc.stop(at + seconds + 0.02);
@@ -603,8 +716,10 @@ window.CardSorterAudio = (function () {
         ratio: Math.round((Math.max(config.toneAcceptHz, config.toneRejectHz)
           / Math.min(config.toneAcceptHz, config.toneRejectHz)) * 1000) / 1000,
         risk: harmonicRisk(config.toneAcceptHz, config.toneRejectHz),
-        // Reported per cue: unlike harmonics, this is a property of ONE frequency, not the pair.
-        resonance: resonanceRisk(config.toneRejectHz) || resonanceRisk(config.toneAcceptHz),
+        // Reported per cue: unlike harmonics, this is a property of ONE frequency, not the pair —
+        // and of the ramp, since a gentle onset is what makes the band survivable.
+        resonance: resonanceRisk(config.toneRejectHz, config.toneRampMs)
+          || resonanceRisk(config.toneAcceptHz, config.toneRampMs),
       };
     },
     PACKS: PACKS,
