@@ -424,14 +424,20 @@ export interface AppSettings {
    * both ~0.6s, everything else under 4% of peak — one octave apart with no harmonic clutter,
    * which is what makes them easy for a cheap mic and a threshold detector to tell apart.
    *
-   * `synth` plays the ka-ching / low gong generated in audio.js. Pleasanter over a 250-card
+   * `synth` plays the ka-ching / woodblock generated in audio.js. Pleasanter over a 250-card
    * pile, but NOT what the machine was taught — a decorative sound layered onto a control tone is
    * how you make a naive detector misfire. Use it only while no machine is listening.
    *
-   * The gong is a G2 plate with seven inharmonic modes, all of them under 620Hz. That ceiling is
-   * load-bearing for the same reason the `done` cue's is: these play into the same room as the
-   * X1PRO's microphone, so no decorative partial may sit near a frequency the machine listens
-   * for. `scripts/tone-config-test.js` asserts it.
+   * The reject cue is two woodblock knocks, E5 then C#5. Its body modes sit at 554-659Hz, inside
+   * the micro-speaker's resonance band where the speaker amplifies them for free — which is what
+   * makes it audible where the 98Hz gong it replaced was not.
+   *
+   * Every partial clears 941 and 1477Hz by at least 25%; their 2nd harmonics, which the speaker
+   * produces on its own at a few percent of level, clear by at least 10%. Two thresholds because
+   * one would be impossible — the corridor between the bands caps 2nd-harmonic clearance at 22%.
+   * Load-bearing for the same reason the `done` cue's ceiling is: these play into the same room
+   * as the X1PRO's microphone, so no decorative partial may sit near a frequency the machine
+   * listens for. `scripts/tone-config-test.js` asserts both.
    */
   soundPack: 'machine' | 'synth' | 'tones';
   /**
