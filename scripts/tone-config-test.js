@@ -342,7 +342,7 @@ console.log('\nthe bundled DEFAULTS are the pair Sound Learn actually accepted')
   }
 }
 
-console.log('\nthe synth pack\u2019s gong \u2014 dark, inharmonic, and clear of the detection bands');
+console.log('\nthe synth pack\u2019s woodblock \u2014 loud, dry, and clear of the detection bands');
 {
   const log = [];
   const A = load(log);
@@ -350,61 +350,68 @@ console.log('\nthe synth pack\u2019s gong \u2014 dark, inharmonic, and clear of 
   const held = A.play('reject');
 
   // voice() logs a contiguous run per oscillator: freq, set, ramp(peak), ramp(release), start.
-  // burst() contributes only set/ramp, so anchoring on 'freq' skips the noise layer cleanly.
+  // burst() contributes only set/ramp, so anchoring on 'freq' skips the mallet layer cleanly.
   const partials = [];
   for (let i = 0; i < log.length; i++) {
     if (log[i][0] !== 'freq') continue;
-    if (log[i + 2] && log[i + 2][0] === 'ramp') {
-      partials.push({ hz: log[i][1], at: log[i][2], peakAt: log[i + 2][2] });
-    }
+    partials.push({ hz: log[i][1], at: log[i][2], endsAt: log[i + 3][2] });
   }
 
-  check('the gong schedules 10 oscillators (7 modes + 3 detuned twins)', partials.length === 10,
-    'got ' + partials.length);
+  check('two knocks of three modes each', partials.length === 6, 'got ' + partials.length);
 
-  const hzs = partials.map((v) => v.hz).sort((a, b) => a - b);
-  check('the fundamental is G2, 98Hz', Math.abs(hzs[0] - 98) < 0.01, 'got ' + hzs[0]);
-  check('nothing reaches 700Hz \u2014 the cue is dark by construction',
-    hzs[hzs.length - 1] < 700, 'top partial ' + Math.round(hzs[hzs.length - 1]) + 'Hz');
+  const bodies = partials.filter((v) => v.hz < 700).sort((a, b) => a.at - b.at);
+  check('the body modes are E5 then C#5', bodies.length === 2
+    && Math.abs(bodies[0].hz - 659.25) < 0.01 && Math.abs(bodies[1].hz - 554.37) < 0.01,
+    bodies.map((v) => Math.round(v.hz)).join(', '));
 
-  // The reason that ceiling exists. Same rule the `done` cue documents: this plays into the same
-  // room as the X1PRO's microphone, so no decorative partial may sit near a frequency the machine
-  // listens for. The margin is far wider than harmonicRisk()'s 3% window because the guard here
-  // is against a detector latching onto the wrong thing, not against distortion products.
-  for (const band of [941, 1477]) {
-    const nearest = Math.min.apply(null, hzs.map((h) => Math.abs(h - band) / band));
-    check('every partial is >25% clear of the ' + band + 'Hz detection band', nearest > 0.25,
-      'nearest is ' + Math.round(nearest * 100) + '%');
-  }
+  // Falling pitch is what makes this read as refusal, and it is the contour that distinguishes it
+  // from the accept cue's RISING fifth without the listener having to attend to either.
+  check('the second knock is lower than the first', bodies[1].hz < bodies[0].hz);
+  check('the knocks are ~110ms apart', Math.abs((bodies[1].at - bodies[0].at) - 0.11) < 0.001,
+    'gap ' + Math.round((bodies[1].at - bodies[0].at) * 1000) + 'ms');
 
-  // Inharmonicity is what separates a gong from an organ stop: an integer multiple of the
-  // fundamental fuses with it into one pitched note instead of a metallic sonority. This is the
-  // assertion that would catch someone "tidying" 2.07 into 2.00.
-  const modes = hzs.filter((h, i) => i === 0 || h / hzs[i - 1] > 1.02); // drop the detuned twins
-  const fused = modes.filter((h) => {
-    const r = h / 98;
-    return r > 1.5 && Math.abs(r - Math.round(r)) < 0.02;
-  });
-  check('no mode is an integer multiple of the fundamental', fused.length === 0,
-    'fused: ' + fused.map((h) => Math.round(h)).join(', '));
+  // The point of the whole cue: the body modes sit inside the micro-speaker's resonance band,
+  // where the speaker amplifies them for free. This is what the 98Hz gong could not do.
+  check('both bodies are inside the speaker resonance band (600-900Hz)',
+    bodies.every((v) => v.hz >= 550 && v.hz < 900), bodies.map((v) => Math.round(v.hz)).join(', '));
 
-  // The bloom is the identifying feature of a struck plate: the high modes swell in after the
-  // strike rather than starting at peak. Take it away and the same partials read as a bell.
-  const fund = partials.filter((v) => Math.abs(v.hz - 98) < 0.01)[0];
-  const top = partials.reduce((a, b) => (b.hz > a.hz ? b : a));
-  check('the fundamental peaks immediately (within 5ms of the strike)',
-    fund.peakAt - fund.at <= 0.005, 'took ' + Math.round((fund.peakAt - fund.at) * 1000) + 'ms');
-  check('the top mode blooms in at least 100ms later',
-    top.peakAt - top.at >= 0.10, 'took ' + Math.round((top.peakAt - top.at) * 1000) + 'ms');
+  // Every partial AND its 2nd harmonic must clear both detection bands — the speaker produces a
+  // 2nd harmonic whether or not it is asked to, which is what rules out the natural 740Hz block
+  // pitch (2 x 740 = 1480Hz, three hertz off the reject tone).
+  //
+  // Two thresholds, deliberately. A synthesized partial arrives at its stated level and is held to
+  // 25%. A 2nd harmonic is a distortion product at a few percent of it, and the corridor between
+  // 941 and 1477 is only 57% wide, so the best margin ANY body pitch can reach there is 22.2% —
+  // asserting 25% on both would be asserting something geometrically impossible. It was, once.
+  const clearance = (hz) => Math.min.apply(null, [941, 1477].map((b) => Math.abs(hz - b) / b));
+  const nearest = (list) => list.reduce((a, v) => (clearance(v) < clearance(a) ? v : a));
 
-  // ToneEmitter waits max(toneSettleMs, returned + 150ms), so a cue reporting its full acoustic
-  // length would silently lengthen every bulk card — ~850ms x 250 cards. The gong's tail
-  // deliberately outlives the number it returns; what it must not outlive is the settle window.
+  const direct = nearest(partials.map((v) => v.hz));
+  check('every synthesized partial is >25% clear of both bands', clearance(direct) > 0.25,
+    Math.round(direct) + 'Hz is only ' + Math.round(clearance(direct) * 100) + '% away');
+
+  const harmonic = nearest(partials.map((v) => v.hz * 2));
+  check('every 2nd harmonic is >10% clear of both bands', clearance(harmonic) > 0.10,
+    Math.round(harmonic) + 'Hz is only ' + Math.round(clearance(harmonic) * 100) + '% away');
+
+  // The thunk's original design argument, which the gong could not honour: you hear this a few
+  // hundred times per pile, so nothing may ring.
+  const acoustic = Math.max.apply(null, partials.map((v) => v.endsAt));
+  check('the whole cue is over inside 250ms', acoustic <= 0.25,
+    'runs ' + Math.round(acoustic * 1000) + 'ms');
+
+  // Unlike the gong, this one has no tail to be honest about, so the returned duration is the
+  // real length rather than the decision-relevant prefix.
+  check('the returned duration covers the actual sound', held >= acoustic,
+    'returns ' + held + 's for ' + Math.round(acoustic * 1000) + 'ms of sound');
+
+  // ToneEmitter waits max(toneSettleMs, returned + 150ms), so a long cue lengthens every card.
   const settleMs = JSON.parse(
     fs.readFileSync(path.join(__dirname, '..', 'config', 'settings.json'), 'utf8')).toneSettleMs;
   check('the reject cue does not lengthen the run loop', held * 1000 + 150 <= settleMs,
     'cue ' + Math.round(held * 1000) + 'ms + 150 vs settle ' + settleMs + 'ms');
 }
+
 
 console.log(`\n${passed} passed, ${failed} failed\n`);
 process.exit(failed === 0 ? 0 : 1);
