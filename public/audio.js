@@ -9,8 +9,8 @@
  *                        pure 1000Hz sine, both ~0.6s, every other frequency <=4% of peak.
  *                        Exactly one octave apart with no harmonic clutter — about the easiest
  *                        pair a cheap mic plus threshold detector could be asked to separate.
- *   "synth"              Ka-ching / woodblock, synthesized here. Nicer to listen to across a
- *                        250-card pile, but NOT what the machine was taught.
+ *   "synth"              Two struck blocks, high and low, synthesized here. Nicer to listen
+ *                        to across a 250-card pile, but NOT what the machine was taught.
  *
  * Which to use is a real decision, not a preference. In Phase 2 the tone stops being operator
  * feedback and becomes the machine's control signal, and a decorative sound layered onto a
@@ -49,7 +49,7 @@ window.CardSorterAudio = (function () {
    * the wrong pack can be told apart from a device running stale cached JS — the two look
    * identical from the outside, and chasing the wrong one costs a deploy cycle each time.
    */
-  const BUILD = '2026-08-28-woodblock-reject';
+  const BUILD = '2026-08-29-paired-blocks';
 
   let ctx = null;
   let master = null;
@@ -68,7 +68,7 @@ window.CardSorterAudio = (function () {
    * *some* context, which decodeTarget() supplies offline. Tying either to unlock() cost us the
    * same bug twice: the tones were still in flight (or still undecoded) when the first cue fired,
    * play() fell back to synth, and the pack silently disagreed with the setting. In Phase 2 that
-   * means the machine hears a ka-ching where it expected 2000Hz and mis-routes the card.
+   * means the machine hears a decorative knock where it expected 2000Hz and mis-routes the card.
    *
    * The first miss was the first card of a run; the second was every first Sound check click
    * after a page load, which is what an operator naturally tests. whenReady() is still the
@@ -272,7 +272,7 @@ window.CardSorterAudio = (function () {
    * as struck. The option exists because that is a real design axis rather than a constant — a
    * large plate BLOOMS, its upper modes barely present at contact and swelling in over the next
    * tenth of a second, and setting this to 100ms+ per partial is what produced that. A small solid
-   * block does not, which is why woodblock() leaves it alone.
+   * block does not, which is why block() leaves it alone.
    */
   function voice(c, opts) {
     const at = opts.at;
@@ -333,79 +333,98 @@ window.CardSorterAudio = (function () {
   }
 
   /**
-   * The woodblock's modes: [ratio, level, decay scale].
+   * The two struck blocks, as [modes, strike]. Modes are [ratio, level, decay scale].
    *
-   * Three, where the gong this replaced needed seven. A block is a small SOLID resonator rather
-   * than a large flat plate: few modes, each dying fast, and one of them carrying nearly all the
-   * energy. That sparseness is what gives a woodblock a definite pitch and a dry, over-in-a-blink
-   * character, and it is why the same additive machinery reads as wood here and as metal in
-   * bell(). The upper ratios are 3.45x and 4.36x rather than anything tidier; see below.
+   * ═══ WHY BOTH CUES ARE NOW THE SAME KIND OF OBJECT ═══
+   *
+   * The reject cue is the only thing in this pack the X1PRO has ever classified reliably — no
+   * misread has been observed on it, while the ka-ching it was paired with was coming back wrong
+   * about half the time. Four theories about WHY were tried and all four were refuted by the rig:
+   *
+   *     the two cues are spectrally too close     no: their dominant partials never overlap in
+   *                                               any sampling window, at any offset
+   *     the accept cue is non-stationary          no: sliding a 150ms window, the woodblock’s
+   *                                               spectral centroid swings MORE (24% vs 12%)
+   *     the accept cue arrives too weak           no: the ka-ching carried 2.5-6.7x more energy
+   *                                               than the woodblock in every window measured
+   *     an early latch on the shared onset        untested, and the one thing still standing
+   *
+   * So the design stopped guessing what the detector measures and copied the cue that demonstrably
+   * works. Both cues are now two short strikes on a small block: front-loaded, entirely over in
+   * under a quarter second, with the loudest partial present from the first millisecond. The
+   * ka-ching was the opposite of all three — 800ms long, its dominant partial arriving at 115ms,
+   * two bells blending over a 360ms overlap.
+   *
+   * ═══ WHAT KEEPS THEM APART ═══
+   *
+   * Copying the shape means the shape can no longer do the discriminating, so four other things
+   * do, and they are independent:
+   *
+   *   REGISTER   the high block’s bodies are 1046/1245Hz, the low block’s 659/554Hz — nearly an
+   *              octave apart, and no partial of either lands within 17% of any partial of the
+   *              other. tone-config-test.js asserts that pairwise.
+   *   CONTOUR    accept RISES a minor third, reject FALLS one. Rising reads as reward and falling
+   *              as refusal, so the two are separable by ear without attending to them.
+   *   TIMING     80ms between the accept strikes, 110ms between the reject ones.
+   *   STRIKE     and this is the one that changed. The mallets used to be IDENTICAL — both
+   *              highpass at 3000Hz, gains 0.302 and 0.300, a difference of under one percent —
+   *              because they were matched on purpose so the pack would sound like one instrument.
+   *              For a listener that is a family resemblance. For a detector deciding on the
+   *              onset it meant the first 16ms of the two cues were the same sound, and the
+   *              ka-ching’s first 15ms were nothing else, since its bell did not enter until
+   *              t+15ms. They are now spectral opposites: dark thud on the high block, bright
+   *              tick on the low one.
+   *
+   * The reject cue’s numbers are UNCHANGED from the version that works. If the misreads persist
+   * after this, the shared onset was not the mechanism either, and the next step is a microphone
+   * rather than a fifth theory.
    */
-  const WOODBLOCK_MODES = [
-    // ratio  level  decay
-    [1.00,    1.00,  1.00],
-    [3.45,    0.30,  0.40],
-    [4.36,    0.15,  0.24],
-  ];
+  const BLOCK_VOICES = {
+    /** The low block — the proven one. Do not retune without a reason; it is the control. */
+    low: {
+      modes: [
+        // ratio  level  decay
+        [1.00,    1.00,  1.00],
+        [3.45,    0.30,  0.40],
+        [4.36,    0.15,  0.24],
+      ],
+      strike: { gain: 0.72, decay: 0.016, filterType: 'highpass', cutoff: 3000 },
+    },
+    /**
+     * The high block. Ratios are 3.30x and 3.95x rather than the low block’s 3.45x and 4.36x for
+     * two reasons at once: they keep its modes clear of the low block’s 1913-2874Hz cluster, and
+     * they keep its top mode under 5kHz, above which the module’s own header notes you are
+     * fighting hiss. A hard mallet on a small bright block would naturally give a bright click;
+     * this one is deliberately dark instead, because sharing an onset with the other cue is the
+     * single defect this rebuild exists to remove.
+     */
+    high: {
+      modes: [
+        [1.00,    1.00,  1.00],
+        [3.30,    0.28,  0.38],
+        [3.95,    0.14,  0.22],
+      ],
+      strike: { gain: 0.66, decay: 0.022, filterType: 'lowpass', cutoff: 1600 },
+    },
+  };
 
-  /**
-   * A struck woodblock. `decay` is the body mode's ring; the upper modes scale off it.
-   *
-   * ═══ WHY THIS IS LOUD AND THE GONG IT REPLACED WAS NOT ═══
-   *
-   * The gong was voiced at 98Hz and could not be heard across a room. Two effects multiplied: a
-   * micro-speaker has essentially no output below ~300Hz, and the ear needs roughly 20dB more
-   * amplitude at 100Hz than at 1kHz to register the same loudness. Gain cannot buy that back —
-   * 20dB is a factor of ten and the cue would clip long before it got there. The energy has to
-   * move, so this one is pitched up by more than two octaves.
-   *
-   * It moves to 554-659Hz, inside the micro-speaker’s mechanical resonance (~600-900Hz).
-   * resonanceRisk() treats that band as a HAZARD, and for the control tones it is one — but the
-   * hazard is precisely that the speaker amplifies whatever lands there, and for a cue nobody is
-   * detecting that is free level. Same physics, opposite sign, because this cue is heard rather
-   * than measured. The 1913-2874Hz modes then sit where the ear is most sensitive and supply the
-   * crack. Between the two effects this is far louder than the gong at a comparable amplitude.
-   *
-   * ═══ WHY THE MODE RATIOS ARE UGLY NUMBERS ═══
-   *
-   * Every partial must clear 941 and 1477Hz, and so must its 2nd harmonic, since the speaker will
-   * produce one whether asked to or not. Threading that is harder than it looks:
-   *
-   *     body 659Hz (E5)   -30% from 941     2nd harmonic 1318Hz   -11% from 1477
-   *     body 554Hz (C#5)  -41% from 941     2nd harmonic 1109Hz   +18% from 941
-   *
-   * The two margins are held to DIFFERENT standards on purpose. A synthesized partial arrives at
-   * its stated level; a 2nd harmonic is a distortion product at a few percent of it, so 1318Hz
-   * reaches the room at roughly 0.013 against the reject tone's 0.80, as a 75ms decaying blip
-   * rather than a 600ms sustained sine. Holding both to the same threshold would be false rigour,
-   * and in fact impossible: the corridor between 941 and 1477 is only 57% wide, so the best
-   * achievable 2nd-harmonic margin is 22.2%, and only for a body pitch parked exactly on 574.8Hz.
-   * An earlier version of this comment claimed 25% on both. It was unreachable.
-   *
-   * 740Hz would be the more natural block pitch and is unusable: its 2nd harmonic lands on 1480Hz,
-   * three hertz off the reject tone. 3.45x is likewise not round because 2.94x — tried first —
-   * put the lower knock’s second mode at 1630Hz, only 10% clear of 1477.
-   *
-   * IF THE LAYERED PACK EVER SHIPS AND THE MACHINE MISBEHAVES, the escalation is to narrow the
-   * interval: Eb5/C#5 is a whole tone instead of a minor third and lifts the worst 2nd-harmonic
-   * margin from 11% to 16%. It costs some of the gesture, which is why it is not the default.
-   *
-   * The mallet click is broadband by nature, so its isolation is a matter of degree rather than a
-   * guarantee: highpassed at 3000Hz and gone in 16ms. The tonal modes are the part that can be
-   * placed exactly, and they are the part the tests assert.
-   */
-  function woodblock(c, at, hz, gain, decay) {
+  /** A struck block. `kind` selects a voice from BLOCK_VOICES; `decay` is the body mode’s ring. */
+  function block(c, at, kind, hz, gain, decay) {
+    const v = BLOCK_VOICES[kind];
     // The mallet, not the block. Without a contact transient the modes fade in and read as a
-    // short organ note; this is what makes it a knock rather than a beep. Same 3000Hz highpass
-    // as the ka-ching’s strike, so both cues sound struck by the same kind of object.
-    burst(c, { at: at, gain: gain * 0.72, decay: 0.016, filterType: 'highpass', cutoff: 3000 });
-    for (let i = 0; i < WOODBLOCK_MODES.length; i++) {
+    // short organ note; this is what makes it a knock rather than a beep.
+    burst(c, {
+      at: at, gain: gain * v.strike.gain, decay: v.strike.decay,
+      filterType: v.strike.filterType, cutoff: v.strike.cutoff,
+    });
+    for (let i = 0; i < v.modes.length; i++) {
       voice(c, {
-        type: 'sine', freq: hz * WOODBLOCK_MODES[i][0], gain: gain * WOODBLOCK_MODES[i][1],
-        at: at, decay: decay * WOODBLOCK_MODES[i][2],
+        type: 'sine', freq: hz * v.modes[i][0], gain: gain * v.modes[i][1],
+        at: at, decay: decay * v.modes[i][2],
       });
     }
   }
+
 
 
   // ═══════════════════════ THE SYNTH PACK ═══════════════════════
@@ -414,14 +433,35 @@ window.CardSorterAudio = (function () {
   // the layers drift apart.
 
   const SYNTH = {
-    /** KA-CHING — metal transient, then two ascending bell strikes (C6 -> G6, a perfect fifth).
-     *  Two strikes because "ka-ching" is heard as two syllables; a single bell reads as a
-     *  doorbell, and the rising pitch is what makes it read as a reward. */
+    /**
+     * RISING KNOCK — two bright block strikes, the second a minor third higher.
+     *
+     * This replaced a ka-ching, and the replacement is structural rather than cosmetic. The
+     * ka-ching was a metal transient plus two bell strikes ringing 450 and 700ms, C6 up to G6,
+     * and the X1PRO classified it correctly about half the time while never once misreading the
+     * reject cue it was paired with. Rather than tune a fifth theory about why, this cue is built
+     * to the same template as the one that works — see BLOCK_VOICES for the full record of what
+     * was measured and ruled out.
+     *
+     * Concretely, what changed about the accept cue: 800ms becomes 162ms; a dominant partial
+     * arriving at t+115ms becomes one present at t+0; two bells overlapping for 360ms become two
+     * strikes that never overlap at all; and an onset shared with the reject cue to within one
+     * percent becomes its spectral opposite.
+     *
+     * What is kept is the gesture. The ka-ching rose a perfect fifth because rising pitch reads as
+     * reward; this rises a minor third for the same reason, against the reject cue’s fall.
+     *
+     * The first strike is the LOUDER one, and that was not the first attempt. Making the second
+     * louder is the natural way to land a rise as an arrival rather than a pair of taps — and it
+     * put the cue's dominant partial at t+90ms, which is the ka-ching's exact defect (t+115ms)
+     * rebuilt at a slightly smaller scale, inside the very change meant to remove it. The test
+     * caught it. The rise lives in the PITCH; the level has a job to do for the detector and it
+     * has to win.
+     */
     accept: function (c, t) {
-      burst(c, { at: t, gain: 0.30, decay: 0.05, filterType: 'highpass', cutoff: 3000 });
-      bell(c, t + 0.015, 1046.50, 0.34, 0.45); // C6 — the "ka"
-      bell(c, t + 0.105, 1567.98, 0.40, 0.70); // G6 — the "ching", rings longer
-      return 0.80;
+      block(c, t,        'high', 1046.50, 0.44, 0.070); // C6
+      block(c, t + 0.08, 'high', 1244.51, 0.39, 0.080); // Eb6, a minor third UP
+      return 0.18;
     },
 
     /**
@@ -455,8 +495,8 @@ window.CardSorterAudio = (function () {
      * settle, so it costs the run loop nothing.
      */
     reject: function (c, t) {
-      woodblock(c, t,        659.25, 0.42, 0.075); // E5
-      woodblock(c, t + 0.11, 554.37, 0.38, 0.085); // C#5, a minor third down
+      block(c, t,        'low', 659.25, 0.42, 0.075); // E5
+      block(c, t + 0.11, 'low', 554.37, 0.38, 0.085); // C#5, a minor third down
       return 0.22;
     },
 
@@ -495,7 +535,7 @@ window.CardSorterAudio = (function () {
    * The measured frequencies of the two vendor tones, so they can be REGENERATED if the sample
    * files can't be used on some device.
    *
-   * This matters more than it looks. Falling back from the machine pack to the ka-ching is the
+   * This matters more than it looks. Falling back from the machine pack to the synth cues is the
    * worst available failure: in Phase 2 the tone is the machine's control signal, so a device
    * that can't decode AAC would route every card wrongly while sounding perfectly pleasant. A
    * synthesized 2000Hz sine is not a decoration of the real tone — for a threshold detector it
@@ -511,11 +551,17 @@ window.CardSorterAudio = (function () {
    * Built after Sound Learn rejected BOTH other packs as "too close", the vendor's own tones
    * being the worse of the two. Two things were wrong, and this pack fixes both.
    *
-   * 1. A cue must measure the same no matter WHEN it is sampled. The synth ka-ching is six
-   *    oscillators starting at two different times and decaying at six different rates, so
-   *    "what frequency is this?" answers ~3000Hz, then 1047Hz, then 1568Hz over its life.
-   *    Sound Learn samples a short window, so repeated presses of one button measured different
-   *    things and classified randomly. A steady sine has no such phase.
+   * 1. A cue must measure the same no matter WHEN it is sampled. The synth pack's cues at the
+   *    time were a ka-ching and a thunk: six oscillators starting at two different times and
+   *    decaying at six different rates, so "what frequency is this?" answered ~3000Hz, then
+   *    1047Hz, then 1568Hz over one cue's life. A steady sine has no such phase.
+   *
+   *    That reasoning turned out to be too coarse, and the current synth pack is the evidence:
+   *    sliding a 150ms window across the two struck blocks, the LOW one's spectral centroid
+   *    swings twice as far as the ka-ching's did (24% vs 12%), and it classifies perfectly. What
+   *    matters is not whether a cue varies but whether the variation stays inside the window, and
+   *    whether the two cues vary into each other's range. A steady sine simply satisfies both
+   *    conditions for free, which is still the argument for this pack.
    *
    * 2. The two cues must not be HARMONICALLY RELATED. The vendor pair is 1000 and 2000Hz —
    *    exactly an octave, which is the single worst choice available here. A phone speaker at

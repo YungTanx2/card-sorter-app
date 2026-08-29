@@ -424,20 +424,28 @@ export interface AppSettings {
    * both ~0.6s, everything else under 4% of peak — one octave apart with no harmonic clutter,
    * which is what makes them easy for a cheap mic and a threshold detector to tell apart.
    *
-   * `synth` plays the ka-ching / woodblock generated in audio.js. Pleasanter over a 250-card
-   * pile, but NOT what the machine was taught — a decorative sound layered onto a control tone is
-   * how you make a naive detector misfire. Use it only while no machine is listening.
+   * `synth` plays two struck blocks generated in audio.js: a high one rising C6->Eb6 for accept,
+   * a low one falling E5->C#5 for reject. Pleasanter over a 250-card pile than steady sines.
    *
-   * The reject cue is two woodblock knocks, E5 then C#5. Its body modes sit at 554-659Hz, inside
-   * the micro-speaker's resonance band where the speaker amplifies them for free — which is what
-   * makes it audible where the 98Hz gong it replaced was not.
+   * It is NOT what the machine was taught unless you teach it — which this rig now has. Sound
+   * Learn was trained on this pack directly, so 941/1477 are not in play while it is selected,
+   * and the cues themselves are the templates.
    *
-   * Every partial clears 941 and 1477Hz by at least 25%; their 2nd harmonics, which the speaker
-   * produces on its own at a few percent of level, clear by at least 10%. Two thresholds because
-   * one would be impossible — the corridor between the bands caps 2nd-harmonic clearance at 22%.
-   * Load-bearing for the same reason the `done` cue's ceiling is: these play into the same room
-   * as the X1PRO's microphone, so no decorative partial may sit near a frequency the machine
-   * listens for. `scripts/tone-config-test.js` asserts both.
+   * Both cues are deliberately the SAME KIND OF OBJECT: two short strikes, front-loaded, over
+   * inside a quarter second. That shape is copied from the reject cue, which is the only thing
+   * this rig has ever classified reliably. The accept cue used to be a ka-ching and came back
+   * wrong about half the time; four explanations were measured and refuted before the design
+   * stopped guessing and copied what worked. See BLOCK_VOICES in audio.js for the record.
+   *
+   * What separates them, since the shape no longer can: register (no partial of one within 15% of
+   * any partial of the other), contour (one rises, one falls), strike timing (80 vs 110ms), and
+   * the mallets, which are spectral opposites. That last one matters most — the two cues used to
+   * share an identical strike transient, matched to within one percent on purpose so the pack
+   * would sound like one instrument. `scripts/tone-config-test.js` asserts all four.
+   *
+   * NOTE these cues are no longer clear of 941/1477 the way the earlier ones were: accept's C6
+   * sits 11% from the accept tone. That is fine while the machine is taught on this pack and
+   * would need retuning first if a layered pack were ever built.
    */
   soundPack: 'machine' | 'synth' | 'tones';
   /**
