@@ -424,13 +424,17 @@ export interface AppSettings {
    * both ~0.6s, everything else under 4% of peak — one octave apart with no harmonic clutter,
    * which is what makes them easy for a cheap mic and a threshold detector to tell apart.
    *
-   * `synth` plays a rising chime for accept (two struck bells, G5 -> A#5, ringing 600ms) against
-   * a falling woodblock knock for reject (E5 -> C#5, dry, over in 207ms).
+   * `synth` plays two struck blocks: a double woodblock knock for accept (E5 -> C#5, 207ms) and
+   * a triple low thud for reject (A4 -> G4 -> F4, 252ms).
    *
-   * BOTH CUES SIT UNDER 941Hz, and that is the hardest-won constraint in the audio layer. Every
-   * cue this rig has classified reliably has been at or below ~941Hz and every one that failed
-   * was above ~1250Hz — twice, on unrelated designs, and swapping which cue carried which
-   * decision moved nothing. The failure follows the pitch, not the decision.
+   * THE ACCEPT CUE IS THE ONLY SOUND THIS RIG HAS EVER CLASSIFIED RELIABLY, in either role and
+   * against every partner it has been given — a ka-ching, a second woodblock, and bells at three
+   * different pitches, each of which was misread about half the time. It carries accept because
+   * keeper-into-bulk is the error that costs you a card.
+   *
+   * Everything sits between 300 and 941Hz. A micro-speaker is efficient only near its ~600-900Hz
+   * resonance and rolls off on both sides: above it killed every high cue tried, below it killed
+   * a 98Hz gong that could not be heard across a room.
    *
    * It is NOT what the machine was taught unless you teach it — which this rig now has. Sound
    * Learn was trained on this pack directly, so 941/1477 are not in play while it is selected,
@@ -448,9 +452,9 @@ export interface AppSettings {
    * 15% of any partial of the other). The full experiment log is above WOODBLOCK_MODES in
    * audio.js.
    *
-   * NOTE a layered pack (tones for the machine, these on top) is no longer straightforward:
-   * accept's A#5 is within 1% of the tones pack's 941Hz accept tone, because both were driven to
-   * the same ceiling by the same physics. One or the other would have to move.
+   * NOTE a layered pack (tones for the machine, these on top) is not straightforward: the tones
+   * pack's own 941Hz cue was driven to the same band by the same physics, so the two would be
+   * competing for the same narrow range of frequencies the machine can actually hear.
    */
   soundPack: 'machine' | 'synth' | 'tones';
   /**

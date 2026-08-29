@@ -9,11 +9,11 @@
  *                        pure 1000Hz sine, both ~0.6s, every other frequency <=4% of peak.
  *                        Exactly one octave apart with no harmonic clutter — about the easiest
  *                        pair a cheap mic plus threshold detector could be asked to separate.
- *   "synth"              A rising chime against a falling woodblock knock, synthesized here.
- *                        Nicer across a 250-card pile, and this rig HAS taught Sound Learn on
- *                        it — in which case these cues become the templates and the tone
- *                        settings stop applying. Everything in it is under 941Hz; see
- *                        SYNTH.accept for why that ceiling is not negotiable.
+ *   "synth"              Two struck blocks: a double woodblock knock for accept, a triple
+ *                        low thud for reject. Nicer across a 250-card pile, and this rig HAS
+ *                        taught Sound Learn on it — in which case these cues become the
+ *                        templates and the tone settings stop applying. Everything sits between
+ *                        300 and 941Hz; see logdrum() for the elimination that got here.
  *
  * Which to use is a real decision, not a preference. In Phase 2 the tone stops being operator
  * feedback and becomes the machine's control signal, and a decorative sound layered onto a
@@ -52,7 +52,7 @@ window.CardSorterAudio = (function () {
    * the wrong pack can be told apart from a device running stale cached JS — the two look
    * identical from the outside, and chasing the wrong one costs a deploy cycle each time.
    */
-  const BUILD = '2026-08-29-low-bell';
+  const BUILD = '2026-08-29-block-and-drum';
 
   let ctx = null;
   let master = null;
@@ -400,6 +400,64 @@ window.CardSorterAudio = (function () {
     }
   }
 
+  /**
+   * The low drum's modes: [ratio, level, decay scale].
+   *
+   * A SECOND percussive voice, because the woodblock is the only sound this machine has ever
+   * classified reliably and every attempt to pair it with something else has failed:
+   *
+   *     partner            pitch of the partner   Sound Learn   in-run
+   *     ka-ching           1046/1568Hz            accepted      partner wrong ~50%
+   *     high woodblock     1046/1244Hz            REFUSED       -
+   *     bell Eb6/G6        1244/1568Hz            accepted      partner wrong ~50%
+   *     bell G5/A#5         784/932Hz             accepted      partner wrong ~50%
+   *
+   * That last row is the one that ruled out a simple frequency ceiling. 932Hz is within 1% of the
+   * 941Hz tone the tones pack has never had trouble with, and it still failed. So the variable is
+   * not pitch alone — the woodblock at 554/659Hz keeps working while everything else in the room,
+   * at any pitch tried, does not.
+   *
+   * What is left after that elimination is the KIND of sound. The woodblock is short, dry, dense
+   * and percussive; every partner it has been given has been longer, or softer-edged, or both.
+   * So this voice is built to be the same kind of thing — another struck block — and the pair is
+   * separated on everything except that.
+   *
+   * ═══ THE RISK, NAMED ═══
+   *
+   * Two blocks have been refused once already, as too similar. That pair differed only in pitch:
+   * mode ratios of 3.30/3.95 against 3.45/4.36, identical envelopes, durations within 40ms, energy
+   * within 1%. This one differs in strike COUNT (three against two), mode ratios (2.20/2.90
+   * against 3.45/4.36, a 19% minimum gap), register (26% at the closest fundamentals) and mallet
+   * (lowpass against highpass). If Sound Learn refuses again, the next thing to vary is the strike
+   * count further — a single knock against a triple — since that is the one difference it has
+   * never been offered.
+   *
+   * Ratios 2.20x and 2.90x rather than the woodblock's 3.45x and 4.36x also do useful acoustic
+   * work: they pull this voice's upper modes down to 768-1276Hz, so a drum whose fundamental sits
+   * at 349-440Hz — below the speaker's efficient range — still puts real energy inside it.
+   */
+  const LOGDRUM_MODES = [
+    // ratio  level  decay
+    [1.00,    1.00,  1.00],
+    [2.20,    0.34,  0.46],
+    [2.90,    0.18,  0.28],
+  ];
+
+  /** A struck low drum. Same machinery as woodblock(), deliberately different proportions. */
+  function logdrum(c, at, hz, gain, decay) {
+    // Soft beater, where the woodblock's is a hard tip. The two cues must not share an onset:
+    // they did once, matched to under one percent, and that is what the highpass/lowpass split
+    // exists to prevent.
+    burst(c, { at: at, gain: gain * 0.45, decay: 0.024, filterType: 'lowpass', cutoff: 1200 });
+    for (let i = 0; i < LOGDRUM_MODES.length; i++) {
+      voice(c, {
+        type: 'sine', freq: hz * LOGDRUM_MODES[i][0], gain: gain * LOGDRUM_MODES[i][1],
+        at: at, decay: decay * LOGDRUM_MODES[i][2],
+      });
+    }
+  }
+
+
 
   // ═══════════════════════ THE SYNTH PACK ═══════════════════════
   // Each returns its approximate duration in seconds. Times are relative to a scheduling anchor
@@ -408,60 +466,27 @@ window.CardSorterAudio = (function () {
 
   const SYNTH = {
     /**
-     * RISING CHIME — two struck bells, G5 up to A#5, ringing over 600ms.
+     * DOUBLE KNOCK — the proven cue, now carrying the ACCEPT decision.
      *
-     * ═══ THE CEILING, WHICH IS THE MOST IMPORTANT THING IN THIS FILE ═══
+     * This is the woodblock, unchanged: the same E5/C#5, the same gains, the same 110ms spacing,
+     * the same hard-tipped mallet it has had since it was written. It is the only sound this
+     * machine has ever classified reliably, across every pairing it has been given, and it has
+     * never once been misread in either role.
      *
-     * EVERY cue this machine has classified reliably has had its energy at or below ~941Hz, and
-     * every cue that has failed has been above ~1250Hz. Twice now, on two unrelated sound designs:
+     * It carries accept because keeper-into-bulk is the expensive error. A card wrongly sent to
+     * the bulk pile is a card you have to find again by hand; a bulk card wrongly kept costs a
+     * second of sorting. When one cue is reliable and the other is not, the reliable one belongs
+     * on the decision you cannot afford to get wrong — the same argument that swapped the tones
+     * pack's mapping in the first place.
      *
-     *     tones   941Hz reliable          1477Hz dropped out
-     *     synth   554/659Hz block perfect  1244/1568Hz bell wrong ~50% of the time
-     *
-     * And the decisive test: swapping which cue carried which DECISION moved nothing. The high
-     * cue failed as the accept cue, and it failed again as the reject cue. The failure follows the
-     * PITCH.
-     *
-     * That retires four rounds of theories in one line. Harmonic collision, non-stationarity,
-     * shared onsets, discrimination — all of them were about the relationship BETWEEN the two
-     * cues, and the fault was never relational. One cue was simply not being heard. The likeliest
-     * cause is the chain: a micro-speaker's output falls off steeply above its ~600-900Hz
-     * resonance, a cheap electret with AGC rolls off high too, and a running sorter is noisy, so
-     * the high cue arrives with the worst SNR of anything in the room. It survives teaching, where
-     * the phone is close and the machine is quiet, and then fails during a run. That is exactly
-     * the pattern observed.
-     *
-     * So both fundamentals now sit inside the proven band. 932.33Hz is within 1% of the 941Hz
-     * tone that has never once failed on this rig.
-     *
-     * ═══ AND THE HIGHER CUE IS THE LOUDER ONE AGAIN ═══
-     *
-     * levelRisk() states the rule and the previous build broke it: the two cues were equalised to
-     * within 1% of each other's energy, deliberately, to "remove level as a confound". Equal at
-     * the speaker is NOT equal at the microphone, which is the entire point of that guard. This
-     * cue is still the higher of the two, so it is again the louder of the two.
-     *
-     * ═══ WHAT IS NOT BEING PROTECTED ANY MORE ═══
-     *
-     * Its 2.76x partial lands 5% from one of the woodblock's upper modes, and an earlier version
-     * of this file would have moved the pitch to avoid that. It is left alone on evidence: the
-     * ka-ching had a partial 0.5% from the woodblock's 2874Hz mode for its entire life and Sound
-     * Learn taught that pair without complaint. Partial proximity between quiet upper modes has
-     * never once been the problem here. The FUNDAMENTALS are 19% and 41% clear, and those are the
-     * parts carrying the level.
-     *
-     * Kept from the versions before: bell ratios of 2.76x and 5.40x, so this stays timbrally a
-     * different object from the block — that is what got the pair past Sound Learn, and making the
-     * two cues alike is what got a previous pair refused. Two strikes 90ms apart, the first the
-     * louder, rising because rising pitch reads as reward against the block's fall.
+     * There is no rising contour here any more, because the cue that had one was the cue that
+     * kept failing. Both cues now fall; they are told apart by what they are, not by which way
+     * they move. See logdrum() for what carries the discrimination instead.
      */
     accept: function (c, t) {
-      // Peak sums to gain x 1.58 across bell()'s three partials; at soundVolume 1 that has to
-      // stay under unity or the cue clips before it reaches the speaker. 0.56 x 1.58 = 0.885.
-      burst(c, { at: t, gain: 0.18, decay: 0.030, filterType: 'lowpass', cutoff: 1600 });
-      bell(c, t + 0.010, 783.99, 0.56, 0.38); // G5
-      bell(c, t + 0.100, 932.33, 0.48, 0.50); // A#5, a minor third up, rings longer
-      return 0.62;
+      woodblock(c, t,        659.25, 0.42, 0.075); // E5
+      woodblock(c, t + 0.11, 554.37, 0.38, 0.085); // C#5, a minor third down
+      return 0.22;
     },
 
     /**
@@ -494,10 +519,40 @@ window.CardSorterAudio = (function () {
      * length — there is no tail to be honest about — and 220ms is comfortably inside the 800ms
      * settle, so it costs the run loop nothing.
      */
+    /**
+     * TRIPLE THUD — three descending strikes on a low drum, A4 / G4 / F4.
+     *
+     * ═══ WHY THREE STRIKES ═══
+     *
+     * Because it is the one difference this machine has never been offered. Every pair tried so
+     * far has been two events against two events, and the only pair of BLOCKS tried was refused
+     * as too similar. Strike count is categorical rather than a matter of degree, which is
+     * exactly what a similarity check is likeliest to notice — and three descending thuds reads
+     * as a flat "no" far better than a rising anything ever read as a yes.
+     *
+     * ═══ WHY THE GAIN IS HIGHER THAN THE ACCEPT CUE'S, WHICH LOOKS BACKWARDS ═══
+     *
+     * levelRisk() states the rule as "the higher cue must be the louder one", and that was always
+     * a special case of something more general: a micro-speaker is efficient only near its
+     * ~600-900Hz resonance and rolls off on BOTH sides of it. Steeply above, which is what has
+     * killed every high cue this rig has been given. Just as surely below, which is what killed
+     * the 98Hz gong. This drum's fundamentals sit at 349-440Hz, under the band, so it is the cue
+     * that arrives quieter and it is the cue that needs the gain — even though it is the lower of
+     * the two. The rule is distance from the band, not pitch.
+     *
+     * Its 2.20x and 2.90x modes land at 768-1276Hz, inside the efficient band, which is the other
+     * half of the same compensation: the fundamental supplies the weight and the modes supply the
+     * level.
+     *
+     * 0.54 x the 1.52 summed across three modes is 0.82, and the beater adds ~0.14 by the time the
+     * modes peak. At soundVolume 1 that has to stay under unity or the cue clips before it reaches
+     * the speaker.
+     */
     reject: function (c, t) {
-      woodblock(c, t,        659.25, 0.42, 0.075); // E5
-      woodblock(c, t + 0.11, 554.37, 0.38, 0.085); // C#5, a minor third down
-      return 0.22;
+      logdrum(c, t,        440.00, 0.54, 0.085); // A4
+      logdrum(c, t + 0.075, 392.00, 0.50, 0.085); // G4
+      logdrum(c, t + 0.150, 349.23, 0.46, 0.090); // F4
+      return 0.26;
     },
 
     /** ALERT — the run stalled and needs hands. Three alternating square pulses, and the only
