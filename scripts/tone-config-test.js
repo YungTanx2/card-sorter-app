@@ -391,9 +391,24 @@ console.log('\nthe synth pack — a bell against a block, sharing nothing');
   check('reject strikes stay 110ms apart',
     Math.abs((rej.groups[1][0].at - rej.groups[0][0].at) - 0.11) < 0.001);
 
-  check('accept is Eb6 then G6, rising',
-    Math.abs(acc.pitches[0] - 1244.51) < 0.01 && Math.abs(acc.pitches[1] - 1567.98) < 0.01,
+  check('accept is G5 then A#5, rising',
+    Math.abs(acc.pitches[0] - 783.99) < 0.01 && Math.abs(acc.pitches[1] - 932.33) < 0.01,
     acc.pitches.map(Math.round).join(', '));
+
+  // ═══ THE CEILING — the single most predictive rule this rig has produced ═══
+  //
+  // Every cue this machine has classified reliably has had its energy at or below ~941Hz; every
+  // cue that failed was above ~1250Hz. Twice, on two unrelated designs (tones: 941 fine, 1477
+  // dropped; synth: 554/659 block perfect, 1244/1568 bell wrong ~50%). And the decisive test:
+  // swapping which cue carried which DECISION moved nothing — the high cue failed in both roles.
+  // The fault is not relational, so no amount of separating the two cues can fix it.
+  const CEILING = 941;
+  for (const nm of ['accept', 'reject']) {
+    const m = nm === 'accept' ? acc : rej;
+    check(nm + ' stays inside the band this rig can actually hear (<=' + CEILING + 'Hz)',
+      m.pitches.every((hz) => hz <= CEILING),
+      m.pitches.map(Math.round).join(', ') + 'Hz');
+  }
   check('accept RISES where reject FALLS',
     acc.pitches[1] > acc.pitches[0] && rej.pitches[1] < rej.pitches[0]);
 
@@ -431,23 +446,31 @@ console.log('\nthe synth pack — a bell against a block, sharing nothing');
     acc.strikes.every((f) => f.type === 'lowpass') && rej.strikes.every((f) => f.type === 'highpass'),
     accF.join(' ') + ' / ' + rejF.join(' '));
 
-  // Register. bell() puts a partial at 2.76x, and 2.76 x C6 = 2888Hz sat 0.5% from the woodblock's
-  // 2874Hz mode for the whole life of the ka-ching, unnoticed. Hence Eb6 rather than C6.
+  // Register, on the FUNDAMENTALS only. An earlier version of this asserted 15% across every
+  // partial including the quiet upper modes, and that was over-strict: the ka-ching carried a
+  // partial 0.5% from the woodblock's 2874Hz mode for its entire life and Sound Learn taught the
+  // pair without complaint. Partial proximity between quiet upper modes has never been a problem
+  // here. What carries the level, and therefore what has to stay apart, is the fundamentals.
   let closest = 1, pair = '';
-  for (const a of acc.partials) {
-    for (const r of rej.partials) {
-      const d = Math.abs(a.hz - r.hz) / Math.min(a.hz, r.hz);
-      if (d < closest) { closest = d; pair = Math.round(a.hz) + ' vs ' + Math.round(r.hz); }
+  for (const a of acc.pitches) {
+    for (const r of rej.pitches) {
+      const d = Math.abs(a - r) / Math.min(a, r);
+      if (d < closest) { closest = d; pair = Math.round(a) + ' vs ' + Math.round(r); }
     }
   }
-  check('no partial of one cue lands within 15% of any partial of the other', closest > 0.15,
+  check('the cues’ fundamentals stay 15% apart', closest > 0.15,
     pair + ' are only ' + Math.round(closest * 100) + '% apart');
 
-  // Level was one of the theories this rig refuted — the ka-ching carried 2.5-6.7x MORE energy
-  // than the woodblock and was still the cue that got misread. Peak parity removes the confound.
-  const spread = Math.abs(acc.loudest - rej.loudest) / Math.min(acc.loudest, rej.loudest);
-  check('neither cue is the loud one', spread < 0.20,
-    'accept peaks ' + acc.loudest + ', reject ' + rej.loudest);
+  // levelRisk() states the rule for the tones pack and it applies here for the same physical
+  // reason: a micro-speaker radiates less as frequency rises, so equal amplitude at the speaker is
+  // NOT equal amplitude at the microphone. The previous build equalised the two cues to within 1%
+  // on purpose, to "remove level as a confound", which broke the one guard that has ever predicted
+  // this rig's behaviour. Whichever cue is pitched higher must be the louder one.
+  const accHigher = Math.max.apply(null, acc.pitches) > Math.max.apply(null, rej.pitches);
+  const hi = accHigher ? acc : rej, lo = accHigher ? rej : acc;
+  check('the higher-pitched cue is the louder one', hi.loudest > lo.loudest,
+    (accHigher ? 'accept' : 'reject') + ' is higher and peaks ' + hi.loudest
+    + ' against ' + lo.loudest);
 
   // A dominant partial arriving late is the one property the working cue has never had. The
   // ka-ching's arrived at t+115ms; both cues now peak on their first strike.
@@ -470,8 +493,9 @@ console.log('\nthe synth pack — a bell against a block, sharing nothing');
     'accept ' + (acc.held * 1000 + 150) + 'ms vs settle ' + settleMs + 'ms');
 
   // NOTE no detection-band assertion here: the machine is taught on THIS pack, so 941/1477 are
-  // not in play. accept's G6 sits 6% from the reject tone, so a layered pack (tones for the
-  // machine, these on top) would need it retuned before it could be built.
+  // not in play. accept's A#5 is now 1% from the tones pack's 941Hz accept tone, which makes a
+  // layered pack (tones for the machine, these on top) impossible without retuning one or the
+  // other — they would be the same frequency. That is a real cost of moving under the ceiling.
 }
 
 

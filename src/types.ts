@@ -424,8 +424,13 @@ export interface AppSettings {
    * both ~0.6s, everything else under 4% of peak — one octave apart with no harmonic clutter,
    * which is what makes them easy for a cheap mic and a threshold detector to tell apart.
    *
-   * `synth` plays a rising chime for accept (two struck bells, Eb6 -> G6, ringing 600ms) against
+   * `synth` plays a rising chime for accept (two struck bells, G5 -> A#5, ringing 600ms) against
    * a falling woodblock knock for reject (E5 -> C#5, dry, over in 207ms).
+   *
+   * BOTH CUES SIT UNDER 941Hz, and that is the hardest-won constraint in the audio layer. Every
+   * cue this rig has classified reliably has been at or below ~941Hz and every one that failed
+   * was above ~1250Hz — twice, on unrelated designs, and swapping which cue carried which
+   * decision moved nothing. The failure follows the pitch, not the decision.
    *
    * It is NOT what the machine was taught unless you teach it — which this rig now has. Sound
    * Learn was trained on this pack directly, so 941/1477 are not in play while it is selected,
@@ -443,9 +448,9 @@ export interface AppSettings {
    * 15% of any partial of the other). The full experiment log is above WOODBLOCK_MODES in
    * audio.js.
    *
-   * NOTE these cues are not clear of 941/1477 the way earlier ones were: accept's G6 sits 6% from
-   * the reject tone. Fine while the machine is taught on this pack; a layered pack would need it
-   * retuned first.
+   * NOTE a layered pack (tones for the machine, these on top) is no longer straightforward:
+   * accept's A#5 is within 1% of the tones pack's 941Hz accept tone, because both were driven to
+   * the same ceiling by the same physics. One or the other would have to move.
    */
   soundPack: 'machine' | 'synth' | 'tones';
   /**
