@@ -424,28 +424,28 @@ export interface AppSettings {
    * both ~0.6s, everything else under 4% of peak — one octave apart with no harmonic clutter,
    * which is what makes them easy for a cheap mic and a threshold detector to tell apart.
    *
-   * `synth` plays two struck blocks generated in audio.js: a high one rising C6->Eb6 for accept,
-   * a low one falling E5->C#5 for reject. Pleasanter over a 250-card pile than steady sines.
+   * `synth` plays a rising chime for accept (two struck bells, Eb6 -> G6, ringing 600ms) against
+   * a falling woodblock knock for reject (E5 -> C#5, dry, over in 207ms).
    *
    * It is NOT what the machine was taught unless you teach it — which this rig now has. Sound
    * Learn was trained on this pack directly, so 941/1477 are not in play while it is selected,
    * and the cues themselves are the templates.
    *
-   * Both cues are deliberately the SAME KIND OF OBJECT: two short strikes, front-loaded, over
-   * inside a quarter second. That shape is copied from the reject cue, which is the only thing
-   * this rig has ever classified reliably. The accept cue used to be a ka-ching and came back
-   * wrong about half the time; four explanations were measured and refuted before the design
-   * stopped guessing and copied what worked. See BLOCK_VOICES in audio.js for the record.
+   * The two cues are deliberately DIFFERENT KINDS OF OBJECT, and that constraint was learned the
+   * hard way. A build in which the accept cue was the reject cue transposed up — same mode
+   * structure, same envelope, durations within 40ms, energy within 1% — was refused by Sound
+   * Learn as too similar without being asked to run, even with register, contour, strike timing
+   * and mallet filter all separated. Whatever its check measures, it is not the fundamental.
    *
-   * What separates them, since the shape no longer can: register (no partial of one within 15% of
-   * any partial of the other), contour (one rises, one falls), strike timing (80 vs 110ms), and
-   * the mallets, which are spectral opposites. That last one matters most — the two cues used to
-   * share an identical strike transient, matched to within one percent on purpose so the pack
-   * would sound like one instrument. `scripts/tone-config-test.js` asserts all four.
+   * So four things are held apart, each asserted in `scripts/tone-config-test.js`: mode structure
+   * (bell ratios 2.76x/5.40x against block ratios 3.45x/4.36x), envelope length (600ms against
+   * 207ms), strike transient (lowpass against highpass), and register (no partial of one within
+   * 15% of any partial of the other). The full experiment log is above WOODBLOCK_MODES in
+   * audio.js.
    *
-   * NOTE these cues are no longer clear of 941/1477 the way the earlier ones were: accept's C6
-   * sits 11% from the accept tone. That is fine while the machine is taught on this pack and
-   * would need retuning first if a layered pack were ever built.
+   * NOTE these cues are not clear of 941/1477 the way earlier ones were: accept's G6 sits 6% from
+   * the reject tone. Fine while the machine is taught on this pack; a layered pack would need it
+   * retuned first.
    */
   soundPack: 'machine' | 'synth' | 'tones';
   /**
