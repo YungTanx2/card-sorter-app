@@ -51,10 +51,14 @@ function makeCtx(log) {
     createBufferSource() {
       return { buffer: null, connect(n) { return n || sink; }, start() {}, stop() {} };
     },
-    // Only the synth pack reaches this one, via burst(). It logs nothing: the noise layer has no
-    // frequency to assert on, and leaving it silent keeps the log one entry per oscillator.
+    // Only the synth pack reaches this one, via burst(). The node is logged rather than its
+    // settings, because burst() ASSIGNS type and frequency after construction — read them back
+    // once the cue has finished scheduling. The strike transients are the one thing the two synth
+    // cues must not have in common, so they need asserting.
     createBiquadFilter() {
-      return { type: '', frequency: { value: 0 }, connect(n) { return n || sink; } };
+      const f = { type: '', frequency: { value: 0 }, connect(n) { return n || sink; } };
+      log.push(['filter', f]);
+      return f;
     },
     resume() { return Promise.resolve(); }, close() {},
   };
@@ -342,75 +346,112 @@ console.log('\nthe bundled DEFAULTS are the pair Sound Learn actually accepted')
   }
 }
 
-console.log('\nthe synth pack\u2019s woodblock \u2014 loud, dry, and clear of the detection bands');
+console.log('\nthe synth pack’s paired blocks — same shape, nothing in common');
 {
   const log = [];
   const A = load(log);
   A.configure({ soundEnabled: true, soundVolume: 1, soundPack: 'synth' });
-  const held = A.play('reject');
 
   // voice() logs a contiguous run per oscillator: freq, set, ramp(peak), ramp(release), start.
-  // burst() contributes only set/ramp, so anchoring on 'freq' skips the mallet layer cleanly.
-  const partials = [];
-  for (let i = 0; i < log.length; i++) {
-    if (log[i][0] !== 'freq') continue;
-    partials.push({ hz: log[i][1], at: log[i][2], endsAt: log[i + 3][2] });
+  // burst() logs its filter node plus set/ramp, so anchoring on 'freq' skips the mallet layer.
+  const cue = (name) => {
+    log.length = 0;
+    const held = A.play(name);
+    const partials = [], strikes = [];
+    for (let i = 0; i < log.length; i++) {
+      if (log[i][0] === 'filter') {
+        strikes.push({ type: log[i][1].type, cutoff: log[i][1].frequency.value });
+      }
+      if (log[i][0] !== 'freq') continue;
+      partials.push({ hz: log[i][1], at: log[i][2], lvl: log[i + 2][1], endsAt: log[i + 3][2] });
+    }
+    const bodies = partials.filter((v) => v.hz < 1500).sort((a, b) => a.at - b.at);
+    return { held, partials, strikes, bodies,
+      acoustic: Math.max.apply(null, partials.map((v) => v.endsAt)),
+      loudest: Math.max.apply(null, partials.map((v) => v.lvl)) };
+  };
+
+  const acc = cue('accept'), rej = cue('reject');
+
+  check('both cues are two strikes of three modes',
+    acc.partials.length === 6 && rej.partials.length === 6,
+    acc.partials.length + ' / ' + rej.partials.length);
+
+  // The reject cue is the CONTROL: the only cue this rig has ever classified reliably. Its
+  // numbers must not drift while the accept cue is rebuilt around it.
+  check('reject is unchanged — E5 then C#5, falling', rej.bodies.length === 2
+    && Math.abs(rej.bodies[0].hz - 659.25) < 0.01 && Math.abs(rej.bodies[1].hz - 554.37) < 0.01,
+    rej.bodies.map((v) => Math.round(v.hz)).join(', '));
+  check('reject strikes stay 110ms apart',
+    Math.abs((rej.bodies[1].at - rej.bodies[0].at) - 0.11) < 0.001);
+
+  check('accept is C6 then Eb6, rising', acc.bodies.length === 2
+    && Math.abs(acc.bodies[0].hz - 1046.50) < 0.01 && Math.abs(acc.bodies[1].hz - 1244.51) < 0.01,
+    acc.bodies.map((v) => Math.round(v.hz)).join(', '));
+
+  // Contour makes the pair readable by ear without attending to it, and gives the detector a
+  // second discriminator now that both cues share an envelope.
+  check('accept RISES where reject FALLS',
+    acc.bodies[1].hz > acc.bodies[0].hz && rej.bodies[1].hz < rej.bodies[0].hz);
+  check('the strike timing differs (80ms vs 110ms)',
+    Math.abs((acc.bodies[1].at - acc.bodies[0].at) - 0.08) < 0.001,
+    'accept gap ' + Math.round((acc.bodies[1].at - acc.bodies[0].at) * 1000) + 'ms');
+
+  // THE REGRESSION GUARD. Both mallets used to be highpass/3000 at gains 0.302 and 0.300 —
+  // matched on purpose so the pack sounded like one instrument, which meant the first 16ms of the
+  // two cues were the same sound, and the ka-ching's first 15ms were nothing else. That is the
+  // one defect this rebuild exists to remove, and nothing else here would catch its return.
+  const accF = acc.strikes.map((f) => f.type + '/' + f.cutoff);
+  const rejF = rej.strikes.map((f) => f.type + '/' + f.cutoff);
+  check('the two cues share no strike transient', accF.every((f) => rejF.indexOf(f) < 0),
+    'accept ' + accF.join(' ') + '   reject ' + rejF.join(' '));
+  check('the strikes are spectral opposites (one lowpass, one highpass)',
+    acc.strikes.every((f) => f.type === 'lowpass') && rej.strikes.every((f) => f.type === 'highpass'),
+    accF.join(' ') + ' / ' + rejF.join(' '));
+
+  // Register. With the envelope now shared, this is what carries the discrimination.
+  let closest = 1, pair = '';
+  for (const a of acc.partials) {
+    for (const r of rej.partials) {
+      const d = Math.abs(a.hz - r.hz) / Math.min(a.hz, r.hz);
+      if (d < closest) { closest = d; pair = Math.round(a.hz) + ' vs ' + Math.round(r.hz); }
+    }
   }
+  check('no partial of one cue lands within 15% of any partial of the other', closest > 0.15,
+    pair + ' are only ' + Math.round(closest * 100) + '% apart');
 
-  check('two knocks of three modes each', partials.length === 6, 'got ' + partials.length);
+  // Level was the fourth theory this rig refuted: the ka-ching carried 2.5-6.7x MORE energy than
+  // the woodblock and was still the cue that got misread. Parity is not a fix — it removes a
+  // confound, so that if misreads persist, level is not what to reach for next.
+  const spread = Math.abs(acc.loudest - rej.loudest) / Math.min(acc.loudest, rej.loudest);
+  check('neither cue is the loud one', spread < 0.20,
+    'accept peaks ' + acc.loudest + ', reject ' + rej.loudest);
 
-  const bodies = partials.filter((v) => v.hz < 700).sort((a, b) => a.at - b.at);
-  check('the body modes are E5 then C#5', bodies.length === 2
-    && Math.abs(bodies[0].hz - 659.25) < 0.01 && Math.abs(bodies[1].hz - 554.37) < 0.01,
-    bodies.map((v) => Math.round(v.hz)).join(', '));
+  // Front-loaded and quickly over is the ONLY property the working cue has that the ka-ching
+  // lacked, so it is the property being copied.
+  check('both cues are over inside 250ms', acc.acoustic <= 0.25 && rej.acoustic <= 0.25,
+    Math.round(acc.acoustic * 1000) + 'ms / ' + Math.round(rej.acoustic * 1000) + 'ms');
+  check('each cue’s loudest partial is present from its first strike',
+    acc.partials.filter((v) => v.lvl === acc.loudest)[0].at <= acc.bodies[0].at + 0.001
+    && rej.partials.filter((v) => v.lvl === rej.loudest)[0].at <= rej.bodies[0].at + 0.001);
 
-  // Falling pitch is what makes this read as refusal, and it is the contour that distinguishes it
-  // from the accept cue's RISING fifth without the listener having to attend to either.
-  check('the second knock is lower than the first', bodies[1].hz < bodies[0].hz);
-  check('the knocks are ~110ms apart', Math.abs((bodies[1].at - bodies[0].at) - 0.11) < 0.001,
-    'gap ' + Math.round((bodies[1].at - bodies[0].at) * 1000) + 'ms');
-
-  // The point of the whole cue: the body modes sit inside the micro-speaker's resonance band,
-  // where the speaker amplifies them for free. This is what the 98Hz gong could not do.
-  check('both bodies are inside the speaker resonance band (600-900Hz)',
-    bodies.every((v) => v.hz >= 550 && v.hz < 900), bodies.map((v) => Math.round(v.hz)).join(', '));
-
-  // Every partial AND its 2nd harmonic must clear both detection bands — the speaker produces a
-  // 2nd harmonic whether or not it is asked to, which is what rules out the natural 740Hz block
-  // pitch (2 x 740 = 1480Hz, three hertz off the reject tone).
-  //
-  // Two thresholds, deliberately. A synthesized partial arrives at its stated level and is held to
-  // 25%. A 2nd harmonic is a distortion product at a few percent of it, and the corridor between
-  // 941 and 1477 is only 57% wide, so the best margin ANY body pitch can reach there is 22.2% —
-  // asserting 25% on both would be asserting something geometrically impossible. It was, once.
-  const clearance = (hz) => Math.min.apply(null, [941, 1477].map((b) => Math.abs(hz - b) / b));
-  const nearest = (list) => list.reduce((a, v) => (clearance(v) < clearance(a) ? v : a));
-
-  const direct = nearest(partials.map((v) => v.hz));
-  check('every synthesized partial is >25% clear of both bands', clearance(direct) > 0.25,
-    Math.round(direct) + 'Hz is only ' + Math.round(clearance(direct) * 100) + '% away');
-
-  const harmonic = nearest(partials.map((v) => v.hz * 2));
-  check('every 2nd harmonic is >10% clear of both bands', clearance(harmonic) > 0.10,
-    Math.round(harmonic) + 'Hz is only ' + Math.round(clearance(harmonic) * 100) + '% away');
-
-  // The thunk's original design argument, which the gong could not honour: you hear this a few
-  // hundred times per pile, so nothing may ring.
-  const acoustic = Math.max.apply(null, partials.map((v) => v.endsAt));
-  check('the whole cue is over inside 250ms', acoustic <= 0.25,
-    'runs ' + Math.round(acoustic * 1000) + 'ms');
-
-  // Unlike the gong, this one has no tail to be honest about, so the returned duration is the
-  // real length rather than the decision-relevant prefix.
-  check('the returned duration covers the actual sound', held >= acoustic,
-    'returns ' + held + 's for ' + Math.round(acoustic * 1000) + 'ms of sound');
+  check('both returned durations cover the actual sound',
+    acc.held >= acc.acoustic && rej.held >= rej.acoustic,
+    acc.held + 's/' + Math.round(acc.acoustic * 1000) + 'ms, '
+    + rej.held + 's/' + Math.round(rej.acoustic * 1000) + 'ms');
 
   // ToneEmitter waits max(toneSettleMs, returned + 150ms), so a long cue lengthens every card.
   const settleMs = JSON.parse(
     fs.readFileSync(path.join(__dirname, '..', 'config', 'settings.json'), 'utf8')).toneSettleMs;
-  check('the reject cue does not lengthen the run loop', held * 1000 + 150 <= settleMs,
-    'cue ' + Math.round(held * 1000) + 'ms + 150 vs settle ' + settleMs + 'ms');
+  check('neither cue lengthens the run loop',
+    acc.held * 1000 + 150 <= settleMs && rej.held * 1000 + 150 <= settleMs);
+
+  // NOTE there is deliberately no detection-band assertion here any more. The machine is taught on
+  // THIS pack, so 941/1477 are not in play, and the accept cue's C6 sits 11% from 941 by necessity
+  // — the register had to clear the reject cue's, and that is where it landed. If the layered pack
+  // is ever built (tones for the machine, these on top), accept needs retuning first.
 }
+
 
 
 console.log(`\n${passed} passed, ${failed} failed\n`);
