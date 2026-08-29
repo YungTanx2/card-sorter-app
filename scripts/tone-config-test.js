@@ -346,7 +346,7 @@ console.log('\nthe bundled DEFAULTS are the pair Sound Learn actually accepted')
   }
 }
 
-console.log('\nthe synth pack — a bell against a block, sharing nothing');
+console.log('\nthe synth pack — two struck blocks, and everything that separates them');
 {
   const log = [];
   const A = load(log);
@@ -365,7 +365,6 @@ console.log('\nthe synth pack — a bell against a block, sharing nothing');
       if (log[i][0] !== 'freq') continue;
       partials.push({ hz: log[i][1], at: log[i][2], lvl: log[i + 2][1], endsAt: log[i + 3][2] });
     }
-    // Group by onset: each strike is one group, and its lowest partial is that strike's pitch.
     const at = [...new Set(partials.map((v) => v.at))].sort((a, b) => a - b);
     const groups = at.map((t) => partials.filter((v) => v.at === t).sort((a, b) => a.hz - b.hz));
     return { held, partials, strikes, groups,
@@ -377,106 +376,100 @@ console.log('\nthe synth pack — a bell against a block, sharing nothing');
 
   const acc = cue('accept'), rej = cue('reject');
 
-  check('both cues are two strikes of three partials',
-    acc.groups.length === 2 && rej.groups.length === 2
-    && acc.partials.length === 6 && rej.partials.length === 6,
-    acc.groups.length + 'x' + acc.partials.length + ' / '
-    + rej.groups.length + 'x' + rej.partials.length);
-
-  // The reject cue is the CONTROL. It is the only cue this rig has ever classified reliably, and
-  // it must not drift while the accept cue is rebuilt around it for the third time.
-  check('reject is unchanged — E5 then C#5, falling',
-    Math.abs(rej.pitches[0] - 659.25) < 0.01 && Math.abs(rej.pitches[1] - 554.37) < 0.01,
-    rej.pitches.map(Math.round).join(', '));
-  check('reject strikes stay 110ms apart',
-    Math.abs((rej.groups[1][0].at - rej.groups[0][0].at) - 0.11) < 0.001);
-
-  check('accept is G5 then A#5, rising',
-    Math.abs(acc.pitches[0] - 783.99) < 0.01 && Math.abs(acc.pitches[1] - 932.33) < 0.01,
-    acc.pitches.map(Math.round).join(', '));
-
-  // ═══ THE CEILING — the single most predictive rule this rig has produced ═══
+  // ═══ THE ACCEPT CUE IS THE PROVEN ONE, AND IT CARRIES THE EXPENSIVE DECISION ═══
   //
-  // Every cue this machine has classified reliably has had its energy at or below ~941Hz; every
-  // cue that failed was above ~1250Hz. Twice, on two unrelated designs (tones: 941 fine, 1477
-  // dropped; synth: 554/659 block perfect, 1244/1568 bell wrong ~50%). And the decisive test:
-  // swapping which cue carried which DECISION moved nothing — the high cue failed in both roles.
-  // The fault is not relational, so no amount of separating the two cues can fix it.
-  const CEILING = 941;
+  // The woodblock is the only sound this machine has ever classified reliably, in either role,
+  // across every partner it has been given. Keeper-into-bulk is the error that costs you a card,
+  // so the reliable cue belongs on accept. Its numbers must not drift.
+  check('accept is the unchanged woodblock — E5 then C#5',
+    acc.groups.length === 2
+    && Math.abs(acc.pitches[0] - 659.25) < 0.01 && Math.abs(acc.pitches[1] - 554.37) < 0.01,
+    acc.pitches.map(Math.round).join(', '));
+  check('accept keeps its 110ms strike spacing',
+    Math.abs((acc.groups[1][0].at - acc.groups[0][0].at) - 0.11) < 0.001);
+  check('accept keeps its 0.42/0.38 gains',
+    Math.abs(acc.groups[0][0].lvl - 0.42) < 0.001 && Math.abs(acc.groups[1][0].lvl - 0.38) < 0.001,
+    acc.groups.map((g) => g[0].lvl).join(', '));
+
+  check('reject is three descending thuds — A4, G4, F4',
+    rej.groups.length === 3
+    && Math.abs(rej.pitches[0] - 440.00) < 0.01
+    && Math.abs(rej.pitches[1] - 392.00) < 0.01
+    && Math.abs(rej.pitches[2] - 349.23) < 0.01,
+    rej.pitches.map(Math.round).join(', '));
+
+  // ═══ THE BAND ═══
+  //
+  // A micro-speaker is efficient near its ~600-900Hz resonance and rolls off on both sides. Above
+  // it killed every high cue this rig has been given: 1477Hz on the tones pack, then 1046/1568,
+  // 1244/1568 and 784/932 on the synth pack — that last within 1% of a frequency the machine has
+  // never had trouble with, which is what ruled out a simple ceiling. Below it killed the 98Hz
+  // gong, inaudible across a room. Everything has to sit in between.
+  const FLOOR = 300, CEILING = 941;
   for (const nm of ['accept', 'reject']) {
     const m = nm === 'accept' ? acc : rej;
-    check(nm + ' stays inside the band this rig can actually hear (<=' + CEILING + 'Hz)',
-      m.pitches.every((hz) => hz <= CEILING),
+    check(nm + ' pitches stay between ' + FLOOR + ' and ' + CEILING + 'Hz',
+      m.pitches.every((hz) => hz >= FLOOR && hz <= CEILING),
       m.pitches.map(Math.round).join(', ') + 'Hz');
   }
-  check('accept RISES where reject FALLS',
-    acc.pitches[1] > acc.pitches[0] && rej.pitches[1] < rej.pitches[0]);
 
-  // ═══ THE GUARD THAT REPLACED THE LAST ONE ═══
+  // The general form of levelRisk()'s rule. "The higher cue must be louder" was a special case of
+  // "the cue further from the efficient band arrives quieter", which is why the reject cue here is
+  // the louder one despite being the lower one — its fundamentals are furthest from the band.
+  const dist = (hz) => (hz >= 600 && hz <= 900 ? 0 : (hz < 600 ? 600 - hz : hz - 900));
+  const accFar = Math.max.apply(null, acc.pitches.map(dist));
+  const rejFar = Math.max.apply(null, rej.pitches.map(dist));
+  const far = accFar > rejFar ? acc : rej, near = accFar > rejFar ? rej : acc;
+  check('the cue further from the efficient band is the louder one', far.loudest > near.loudest,
+    'far peaks ' + far.loudest + ', near peaks ' + near.loudest);
+
+  // ═══ WHAT SEPARATES TWO CUES THAT ARE NOW THE SAME KIND OF OBJECT ═══
   //
-  // A build ago the accept cue WAS this cue transposed up: same three-mode structure, same two
-  // strikes, same envelope, durations within 40ms, energy within 1%. Sound Learn refused to learn
-  // the pair as too similar, without being asked to run. Whatever its check measures, it is not
-  // the fundamental — two cues differing only in pitch are one sound to it. So the cues must be
-  // built from DIFFERENT PARTS, and these three assertions are what that means concretely.
+  // Two blocks have been refused once already, as too similar. That pair differed only in pitch:
+  // mode ratios 3.30/3.95 against 3.45/4.36, identical envelopes, durations within 40ms, energy
+  // within 1%. These four assertions are the deliberate answer to that refusal.
 
-  // 1. Timbre: bell ratios (2.76x, 5.40x) against block ratios (3.45x, 4.36x). Inharmonic in both
-  //    cases, but not the same inharmonicity.
+  // 1. Strike count — categorical, and the one difference never yet offered to Sound Learn.
+  check('the cues differ in strike COUNT, not just in pitch',
+    acc.groups.length !== rej.groups.length,
+    acc.groups.length + ' vs ' + rej.groups.length + ' strikes');
+
+  // 2. Mode structure: 2.20x/2.90x against 3.45x/4.36x.
   let closestRatio = 9;
-  for (const a of acc.ratios.slice(1)) {
-    for (const r of rej.ratios.slice(1)) {
+  for (const a of acc.ratios.slice(1))
+    for (const r of rej.ratios.slice(1))
       closestRatio = Math.min(closestRatio, Math.abs(a - r) / Math.min(a, r));
-    }
-  }
   check('the two cues do not share a mode structure', closestRatio > 0.15,
     'closest mode ratios are ' + Math.round(closestRatio * 100) + '% apart');
 
-  // 2. Envelope: a long ring against a short knock.
-  check('one cue rings and the other does not (>2x length)', acc.acoustic / rej.acoustic > 2,
-    Math.round(acc.acoustic * 1000) + 'ms vs ' + Math.round(rej.acoustic * 1000) + 'ms');
-
-  // 3. Strike. Both mallets used to be highpass/3000 at gains 0.302 and 0.300 — matched on purpose
-  //    so the pack sounded like one instrument, which meant the first 16ms of the two cues were
-  //    the same sound and the ka-ching's first 15ms were nothing else.
+  // 3. Strike transient. These were once identical — highpass/3000 at gains 0.302 and 0.300,
+  //    matched on purpose so the pack would sound like one instrument.
   const accF = acc.strikes.map((f) => f.type + '/' + f.cutoff);
   const rejF = rej.strikes.map((f) => f.type + '/' + f.cutoff);
   check('the two cues share no strike transient', accF.every((f) => rejF.indexOf(f) < 0),
     'accept ' + accF.join(' ') + '   reject ' + rejF.join(' '));
   check('the strikes are spectral opposites (one lowpass, one highpass)',
-    acc.strikes.every((f) => f.type === 'lowpass') && rej.strikes.every((f) => f.type === 'highpass'),
+    acc.strikes.every((f) => f.type === 'highpass') && rej.strikes.every((f) => f.type === 'lowpass'),
     accF.join(' ') + ' / ' + rejF.join(' '));
 
-  // Register, on the FUNDAMENTALS only. An earlier version of this asserted 15% across every
-  // partial including the quiet upper modes, and that was over-strict: the ka-ching carried a
-  // partial 0.5% from the woodblock's 2874Hz mode for its entire life and Sound Learn taught the
-  // pair without complaint. Partial proximity between quiet upper modes has never been a problem
-  // here. What carries the level, and therefore what has to stay apart, is the fundamentals.
+  // 4. Register, on the fundamentals. Quiet upper modes are not held to this: the ka-ching carried
+  //    a partial 0.5% from the woodblock's 2874Hz mode for its entire life and taught fine.
   let closest = 1, pair = '';
-  for (const a of acc.pitches) {
+  for (const a of acc.pitches)
     for (const r of rej.pitches) {
       const d = Math.abs(a - r) / Math.min(a, r);
       if (d < closest) { closest = d; pair = Math.round(a) + ' vs ' + Math.round(r); }
     }
-  }
-  check('the cues’ fundamentals stay 15% apart', closest > 0.15,
+  check('the cue fundamentals stay 15% apart', closest > 0.15,
     pair + ' are only ' + Math.round(closest * 100) + '% apart');
 
-  // levelRisk() states the rule for the tones pack and it applies here for the same physical
-  // reason: a micro-speaker radiates less as frequency rises, so equal amplitude at the speaker is
-  // NOT equal amplitude at the microphone. The previous build equalised the two cues to within 1%
-  // on purpose, to "remove level as a confound", which broke the one guard that has ever predicted
-  // this rig's behaviour. Whichever cue is pitched higher must be the louder one.
-  const accHigher = Math.max.apply(null, acc.pitches) > Math.max.apply(null, rej.pitches);
-  const hi = accHigher ? acc : rej, lo = accHigher ? rej : acc;
-  check('the higher-pitched cue is the louder one', hi.loudest > lo.loudest,
-    (accHigher ? 'accept' : 'reject') + ' is higher and peaks ' + hi.loudest
-    + ' against ' + lo.loudest);
-
-  // A dominant partial arriving late is the one property the working cue has never had. The
-  // ka-ching's arrived at t+115ms; both cues now peak on their first strike.
-  for (const pair2 of [['accept', acc], ['reject', rej]]) {
-    const m = pair2[1];
-    check(pair2[0] + ' peaks on its first strike',
+  // Both must stay impulsive and front-loaded. A dominant partial arriving late is the one
+  // property the working cue has never had; the ka-ching's arrived at t+115ms.
+  check('both cues are over inside 300ms', acc.acoustic <= 0.30 && rej.acoustic <= 0.30,
+    Math.round(acc.acoustic * 1000) + 'ms / ' + Math.round(rej.acoustic * 1000) + 'ms');
+  for (const nm of ['accept', 'reject']) {
+    const m = nm === 'accept' ? acc : rej;
+    check(nm + ' peaks on its first strike',
       m.partials.filter((v) => v.lvl === m.loudest)[0].at <= m.groups[0][0].at + 0.001);
   }
 
@@ -489,14 +482,18 @@ console.log('\nthe synth pack — a bell against a block, sharing nothing');
   const settleMs = JSON.parse(
     fs.readFileSync(path.join(__dirname, '..', 'config', 'settings.json'), 'utf8')).toneSettleMs;
   check('neither cue lengthens the run loop',
-    acc.held * 1000 + 150 <= settleMs && rej.held * 1000 + 150 <= settleMs,
-    'accept ' + (acc.held * 1000 + 150) + 'ms vs settle ' + settleMs + 'ms');
+    acc.held * 1000 + 150 <= settleMs && rej.held * 1000 + 150 <= settleMs);
 
-  // NOTE no detection-band assertion here: the machine is taught on THIS pack, so 941/1477 are
-  // not in play. accept's A#5 is now 1% from the tones pack's 941Hz accept tone, which makes a
-  // layered pack (tones for the machine, these on top) impossible without retuning one or the
-  // other — they would be the same frequency. That is a real cost of moving under the ceiling.
+  // Peak amplitude. At soundVolume 1 nothing downstream limits, so a cue summing over unity clips
+  // before it reaches the speaker — and a clipped cue is a different sound from the one taught.
+  for (const nm of ['accept', 'reject']) {
+    const m = nm === 'accept' ? acc : rej;
+    const peak = Math.max.apply(null, m.groups.map((g) => g.reduce((s, v) => s + v.lvl, 0)));
+    check(nm + ' stays under unity at soundVolume 1', peak < 0.95,
+      'peaks at ' + Math.round(peak * 1000) / 1000);
+  }
 }
+
 
 
 
