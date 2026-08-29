@@ -12,7 +12,8 @@
  *   "synth"              A rising chime against a falling woodblock knock, synthesized here.
  *                        Nicer across a 250-card pile, and this rig HAS taught Sound Learn on
  *                        it — in which case these cues become the templates and the tone
- *                        settings stop applying.
+ *                        settings stop applying. Everything in it is under 941Hz; see
+ *                        SYNTH.accept for why that ceiling is not negotiable.
  *
  * Which to use is a real decision, not a preference. In Phase 2 the tone stops being operator
  * feedback and becomes the machine's control signal, and a decorative sound layered onto a
@@ -51,7 +52,7 @@ window.CardSorterAudio = (function () {
    * the wrong pack can be told apart from a device running stale cached JS — the two look
    * identical from the outside, and chasing the wrong one costs a deploy cycle each time.
    */
-  const BUILD = '2026-08-29-bell-vs-block';
+  const BUILD = '2026-08-29-low-bell';
 
   let ctx = null;
   let master = null;
@@ -407,43 +408,59 @@ window.CardSorterAudio = (function () {
 
   const SYNTH = {
     /**
-     * RISING CHIME — two struck bells, Eb6 up to G6, ringing over 600ms.
+     * RISING CHIME — two struck bells, G5 up to A#5, ringing over 600ms.
      *
-     * A bell again, after a build in which this cue was a transposed copy of the reject cue and
-     * Sound Learn refused to learn the pair at all. WOODBLOCK_MODES carries the full table; the
-     * short version is that the only pairing this machine has ever accepted is a long inharmonic
-     * bell against a short dry knock, and making the two cues the same kind of object destroyed
-     * that even with register, contour, timing and mallet all separated.
+     * ═══ THE CEILING, WHICH IS THE MOST IMPORTANT THING IN THIS FILE ═══
      *
-     * ═══ WHAT IS DIFFERENT FROM THE KA-CHING THAT TAUGHT BUT MISREAD ═══
+     * EVERY cue this machine has classified reliably has had its energy at or below ~941Hz, and
+     * every cue that has failed has been above ~1250Hz. Twice now, on two unrelated sound designs:
      *
-     * This is deliberately a ONE-VARIABLE change from the last configuration Sound Learn accepted,
-     * so that the run result means something either way.
+     *     tones   941Hz reliable          1477Hz dropped out
+     *     synth   554/659Hz block perfect  1244/1568Hz bell wrong ~50% of the time
      *
-     *   THE MALLET. The ka-ching's strike was highpass/3000 at gain 0.30 and the woodblock's is
-     *   highpass/3000 at gain 0.302 — matched to under one percent, on purpose, so the pack would
-     *   sound like one instrument. For a listener that is a family resemblance. For a detector
-     *   deciding on the onset it meant the first 16ms of the two cues were the same sound, and the
-     *   ka-ching's first 15ms were nothing else, since its first bell did not enter until t+15ms.
-     *   This mallet is a lowpass, so the two onsets are now spectral opposites.
+     * And the decisive test: swapping which cue carried which DECISION moved nothing. The high
+     * cue failed as the accept cue, and it failed again as the reject cue. The failure follows the
+     * PITCH.
      *
-     *   THE PITCHES. C6/G6 became Eb6/G6, because bell() puts a partial at 2.76x the fundamental
-     *   and 2.76 x 1046.5 = 2888Hz, which is 0.5% from the woodblock's 2874Hz mode. The two cues
-     *   were sharing a partial as well as an onset and nothing was checking. Every partial is now
-     *   at least 19% clear of every partial of the other cue.
+     * That retires four rounds of theories in one line. Harmonic collision, non-stationarity,
+     * shared onsets, discrimination — all of them were about the relationship BETWEEN the two
+     * cues, and the fault was never relational. One cue was simply not being heard. The likeliest
+     * cause is the chain: a micro-speaker's output falls off steeply above its ~600-900Hz
+     * resonance, a cheap electret with AGC rolls off high too, and a running sorter is noisy, so
+     * the high cue arrives with the worst SNR of anything in the room. It survives teaching, where
+     * the phone is close and the machine is quiet, and then fails during a run. That is exactly
+     * the pattern observed.
      *
-     * Everything else is the ka-ching's shape: bell ratios of 2.76x and 5.40x, which are what
-     * struck metal produces and integer ratios are not; two strikes 90ms apart, the second ringing
-     * longer; a rise, because rising pitch reads as reward against the reject cue's fall.
+     * So both fundamentals now sit inside the proven band. 932.33Hz is within 1% of the 941Hz
+     * tone that has never once failed on this rig.
      *
-     * The FIRST strike is the louder one, which the ka-ching did the other way round. A dominant
-     * partial arriving late is the one property the working cue has never had, and it costs
-     * nothing here — the rise lives in the pitch, not the level.
+     * ═══ AND THE HIGHER CUE IS THE LOUDER ONE AGAIN ═══
+     *
+     * levelRisk() states the rule and the previous build broke it: the two cues were equalised to
+     * within 1% of each other's energy, deliberately, to "remove level as a confound". Equal at
+     * the speaker is NOT equal at the microphone, which is the entire point of that guard. This
+     * cue is still the higher of the two, so it is again the louder of the two.
+     *
+     * ═══ WHAT IS NOT BEING PROTECTED ANY MORE ═══
+     *
+     * Its 2.76x partial lands 5% from one of the woodblock's upper modes, and an earlier version
+     * of this file would have moved the pitch to avoid that. It is left alone on evidence: the
+     * ka-ching had a partial 0.5% from the woodblock's 2874Hz mode for its entire life and Sound
+     * Learn taught that pair without complaint. Partial proximity between quiet upper modes has
+     * never once been the problem here. The FUNDAMENTALS are 19% and 41% clear, and those are the
+     * parts carrying the level.
+     *
+     * Kept from the versions before: bell ratios of 2.76x and 5.40x, so this stays timbrally a
+     * different object from the block — that is what got the pair past Sound Learn, and making the
+     * two cues alike is what got a previous pair refused. Two strikes 90ms apart, the first the
+     * louder, rising because rising pitch reads as reward against the block's fall.
      */
     accept: function (c, t) {
-      burst(c, { at: t, gain: 0.24, decay: 0.030, filterType: 'lowpass', cutoff: 1600 });
-      bell(c, t + 0.010, 1244.51, 0.42, 0.38); // Eb6
-      bell(c, t + 0.100, 1567.98, 0.36, 0.50); // G6, a major third up, rings longer
+      // Peak sums to gain x 1.58 across bell()'s three partials; at soundVolume 1 that has to
+      // stay under unity or the cue clips before it reaches the speaker. 0.56 x 1.58 = 0.885.
+      burst(c, { at: t, gain: 0.18, decay: 0.030, filterType: 'lowpass', cutoff: 1600 });
+      bell(c, t + 0.010, 783.99, 0.56, 0.38); // G5
+      bell(c, t + 0.100, 932.33, 0.48, 0.50); // A#5, a minor third up, rings longer
       return 0.62;
     },
 
@@ -668,6 +685,12 @@ window.CardSorterAudio = (function () {
    * "the two tones are too similar" fault would be symmetric; this is not a discrimination problem
    * at all, it is a detectability problem on one specific cue. That is why four rounds of
    * frequency-pair tuning changed nothing: separation was never the variable.
+   *
+   * THE SYNTH PACK LATER CONFIRMED THIS INDEPENDENTLY, on a completely unrelated sound design: a
+   * 554/659Hz woodblock classified perfectly while a 1244/1568Hz bell was wrong about half the
+   * time, and swapping which cue carried which DECISION moved nothing — the high cue failed in
+   * both roles. Two designs, one verdict. Treat ~941Hz as this rig's practical ceiling for
+   * anything the machine has to hear across a room, and see SYNTH.accept.
    *
    * Four effects all push the same direction:
    *   - a micro-speaker's output falls off steeply above its resonance, and 941Hz sits IN that
