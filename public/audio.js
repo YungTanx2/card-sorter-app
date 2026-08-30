@@ -39,6 +39,10 @@ window.CardSorterAudio = (function () {
     // arrive at the machine's microphone equally loud even though they leave here equally loud.
     toneAcceptGain: 0.40, toneRejectGain: 0.80,
     toneAcceptMs: 600, toneRejectMs: 600,
+    // The synth pack's two cues, parameterised on their FIRST strike only — see SYNTH_STEP.
+    // These four numbers are the configuration that sorted 240 cards with zero misroutes.
+    synthAcceptHz: 659.25, synthAcceptGain: 0.42,
+    synthRejectHz: 392.00, synthRejectGain: 0.50,
   };
 
   // The vendor's tones, extracted and verified byte-for-byte against the source page.
@@ -52,7 +56,7 @@ window.CardSorterAudio = (function () {
    * the wrong pack can be told apart from a device running stale cached JS — the two look
    * identical from the outside, and chasing the wrong one costs a deploy cycle each time.
    */
-  const BUILD = '2026-08-29-validated-defaults';
+  const BUILD = '2026-08-30-cue-tuner';
 
   let ctx = null;
   let master = null;
@@ -254,6 +258,16 @@ window.CardSorterAudio = (function () {
     // Upper bound is a third of the tone so a long ramp can never eat the steady-state section
     // the detector is supposed to measure; steadyTone() clamps again for the same reason.
     if (Number.isFinite(settings.toneRampMs)) config.toneRampMs = clamp(settings.toneRampMs, 5, 250);
+    // Synth cue pitches clamp to 300-900Hz, which is where this speaker has usable output at all,
+    // NOT to the 660Hz ceiling that actually matters. That is deliberate: the clamp stops
+    // nonsense, synthRisk() reports danger, and a frequency you can reach but are warned about is
+    // more useful for tuning than one the slider refuses to produce. Same division of labour as
+    // harmonicRisk() and the tone frequencies.
+    if (Number.isFinite(settings.synthAcceptHz)) config.synthAcceptHz = clamp(settings.synthAcceptHz, 300, 900);
+    if (Number.isFinite(settings.synthRejectHz)) config.synthRejectHz = clamp(settings.synthRejectHz, 300, 900);
+    // 0.55 is where the louder of the two cues starts summing over unity; see SYNTH_PEAK.
+    if (Number.isFinite(settings.synthAcceptGain)) config.synthAcceptGain = clamp(settings.synthAcceptGain, 0.05, 0.55);
+    if (Number.isFinite(settings.synthRejectGain)) config.synthRejectGain = clamp(settings.synthRejectGain, 0.05, 0.55);
     if (master) master.gain.value = config.soundVolume;
   }
 
@@ -463,6 +477,78 @@ window.CardSorterAudio = (function () {
   // `t`, never to "now" mid-function — reading currentTime repeatedly inside one cue would let
   // the layers drift apart.
 
+  /**
+   * Both synth cues FALL A MINOR THIRD, so each is described by one pitch and one gain and the
+   * second strike is derived. That is what makes a two-slider-per-cue UI honest rather than a
+   * simplification: there was never an independent second pitch to lose.
+   *
+   * The tail ratios are the measured ones from the configuration that sorted 240 cards — 0.38/0.42
+   * and 0.44/0.50 — kept per cue rather than averaged, so the defaults reproduce that run exactly.
+   */
+  const SYNTH_STEP = Math.pow(2, -3 / 12);
+  const SYNTH_TAIL = { accept: 0.38 / 0.42, reject: 0.44 / 0.50 };
+
+  /**
+   * Peak amplitude each cue reaches per unit of gain.
+   *
+   * Every mode peaks together at voice()'s 2ms attack, so their levels simply add; the strike
+   * transient is already decaying by then and contributes whatever burst()'s exponential has left.
+   * Needed because at soundVolume 1 nothing downstream limits, and a cue summing over unity clips
+   * before it reaches the speaker — which makes it a different sound from the one Sound Learn was
+   * taught, without anything in the UI looking wrong.
+   */
+  function burstResidue(scale, decay, at) {
+    return scale * Math.pow(0.0001, at / decay);
+  }
+  const BELL_LEVEL_SUM = 1 + 0.42 + 0.16; // must track bell()'s three partial levels
+  const SYNTH_PEAK = {
+    accept: WOODBLOCK_MODES.reduce(function (a, m) { return a + m[1]; }, 0)
+      + burstResidue(0.72, 0.016, 0.002),
+    reject: BELL_LEVEL_SUM + burstResidue(0.30, 0.026, 0.002),
+  };
+
+  /**
+   * The synth pack's equivalent of harmonicRisk()/resonanceRisk()/levelRisk(), and the reason the
+   * Sound check sliders are safe to hand to a person mid-tuning.
+   *
+   * Ten configurations on this rig produced two rules, both in research memory and in the log above
+   * lowBell(). One of them — "one cue must ring and the other must not" — is structural here and no
+   * slider can break it. The other is a pitch ceiling, and a slider breaks it instantly, so it is
+   * checked live rather than left to whoever is dragging.
+   */
+  const SYNTH_CEILING_HZ = 660;
+  function synthCeilingRisk(acceptHz, rejectHz) {
+    const over = [['accept', acceptHz], ['reject', rejectHz]].filter(function (p) {
+      return p[1] > SYNTH_CEILING_HZ;
+    });
+    if (!over.length) return null;
+    return over.map(function (p) { return p[0] + ' at ' + Math.round(p[1]) + 'Hz'; }).join(' and ')
+      + ' — above ~' + SYNTH_CEILING_HZ + 'Hz this machine misreads a cue about half the time. '
+      + 'Every pitch at or below 659Hz has worked and every one at or above 784Hz has failed, over '
+      + 'ten configurations. This is the rule that took the longest to find; do not spend it '
+      + 'casually.';
+  }
+
+  /** The two cues must not converge on the same pitch, or Sound Learn has nothing to separate. */
+  function synthSpacingRisk(acceptHz, rejectHz) {
+    const gap = Math.abs(acceptHz - rejectHz) / Math.min(acceptHz, rejectHz);
+    if (gap > 0.15) return null;
+    return 'the two cues are only ' + Math.round(gap * 100) + '% apart in pitch — keep at least 15%. '
+      + '(Timbre is what got this pair past Sound Learn, not pitch, but converging them removes the '
+      + 'one difference a run-time detector can still use.)';
+  }
+
+  /** Clipping, which is silent and looks like nothing is wrong. */
+  function synthClipRisk(acceptGain, rejectGain) {
+    const over = [['accept', acceptGain * SYNTH_PEAK.accept], ['reject', rejectGain * SYNTH_PEAK.reject]]
+      .filter(function (p) { return p[1] > 0.95; });
+    if (!over.length) return null;
+    return over.map(function (p) {
+      return p[0] + ' peaks at ' + (Math.round(p[1] * 100) / 100);
+    }).join(' and ') + ' — at soundVolume 1 anything over 1.0 clips before it reaches the speaker, '
+      + 'and a clipped cue is not the sound the machine was taught.';
+  }
+
   const SYNTH = {
     /**
      * DOUBLE KNOCK — the proven cue, now carrying the ACCEPT decision.
@@ -485,8 +571,9 @@ window.CardSorterAudio = (function () {
      * possible outcome of inverting it would prove.
      */
     accept: function (c, t) {
-      woodblock(c, t,        659.25, 0.42, 0.075); // E5
-      woodblock(c, t + 0.11, 554.37, 0.38, 0.085); // C#5, a minor third down
+      const hz = config.synthAcceptHz, g = config.synthAcceptGain;
+      woodblock(c, t,        hz,              g,                    0.075); // E5 by default
+      woodblock(c, t + 0.11, hz * SYNTH_STEP, g * SYNTH_TAIL.accept, 0.085); // a minor third down
       return 0.22;
     },
 
@@ -550,8 +637,9 @@ window.CardSorterAudio = (function () {
      * the speaker.
      */
     reject: function (c, t) {
-      lowBell(c, t,        392.00, 0.50, 0.42); // G4
-      lowBell(c, t + 0.10, 329.63, 0.44, 0.50); // E4, a minor third down, rings longer
+      const hz = config.synthRejectHz, g = config.synthRejectGain;
+      lowBell(c, t,        hz,              g,                    0.42); // G4 by default
+      lowBell(c, t + 0.10, hz * SYNTH_STEP, g * SYNTH_TAIL.reject, 0.50); // a minor third down
       return 0.62;
     },
 
@@ -1005,6 +1093,33 @@ window.CardSorterAudio = (function () {
     harmonicRisk: harmonicRisk,
     resonanceRisk: resonanceRisk,
     levelRisk: levelRisk,
+    synthCeilingRisk: synthCeilingRisk,
+    synthSpacingRisk: synthSpacingRisk,
+    synthClipRisk: synthClipRisk,
+    /** Everything the Sound check sliders need: the derived second strike, the resulting peak,
+     *  and each rule checked live so a retune is caught while dragging rather than at the machine. */
+    synthConfig: function () {
+      const a = config.synthAcceptHz, ag = config.synthAcceptGain;
+      const r = config.synthRejectHz, rg = config.synthRejectGain;
+      const round = function (n) { return Math.round(n * 100) / 100; };
+      return {
+        acceptHz: round(a), acceptTailHz: round(a * SYNTH_STEP),
+        acceptGain: ag, acceptTailGain: round(ag * SYNTH_TAIL.accept),
+        acceptPeak: round(ag * SYNTH_PEAK.accept),
+        rejectHz: round(r), rejectTailHz: round(r * SYNTH_STEP),
+        rejectGain: rg, rejectTailGain: round(rg * SYNTH_TAIL.reject),
+        rejectPeak: round(rg * SYNTH_PEAK.reject),
+        ceiling: synthCeilingRisk(a, r),
+        spacing: synthSpacingRisk(a, r),
+        clipping: synthClipRisk(ag, rg),
+      };
+    },
+    /** The exact four numbers that sorted 240 cards. One click back to known-good matters more
+     *  here than anywhere else in the app, because the pack is the machine's control signal. */
+    SYNTH_VALIDATED: {
+      synthAcceptHz: 659.25, synthAcceptGain: 0.42,
+      synthRejectHz: 392.00, synthRejectGain: 0.50,
+    },
     toneConfig: function () {
       return {
         pack: config.soundPack,

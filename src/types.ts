@@ -466,6 +466,30 @@ export interface AppSettings {
    */
   soundPack: 'machine' | 'synth' | 'tones';
   /**
+   * The `synth` pack's two cues, tunable from the Sound check panel's sliders.
+   *
+   * Each cue is TWO strikes falling a minor third, so one pitch and one gain describe it and the
+   * second strike is derived (`SYNTH_STEP` / `SYNTH_TAIL` in audio.js). There was never an
+   * independent second pitch, so the two-slider-per-cue UI is exact rather than a simplification.
+   *
+   * The shipped values are the configuration that sorted 240 cards with 39 keepers and zero
+   * misroutes. `audio.SYNTH_VALIDATED` holds the same four numbers for the panel's Restore button.
+   *
+   * ⚠ KEEP BOTH PITCHES AT OR UNDER ~660Hz. Every pitch at or below 659Hz has worked on this rig
+   * and every one at or above 784Hz has been misread about half the time, over ten configurations.
+   * The sliders clamp to 300-900Hz rather than 660 so the band stays explorable, and
+   * `synthCeilingRisk()` flags anything above it live while you drag. Gains clamp at 0.55, where
+   * the louder cue starts summing over unity and clipping — which is silent, and makes the cue a
+   * different sound from the one Sound Learn was taught.
+   *
+   * Changing any of these REQUIRES a Sound Learn re-teach: the machine holds templates, not
+   * settings, so a saved-but-untaught cue routes every card backwards.
+   */
+  synthAcceptHz: number;
+  synthAcceptGain: number;
+  synthRejectHz: number;
+  synthRejectGain: number;
+  /**
    * Frequencies for the 'tones' pack, in Hz. Settings rather than constants because the right
    * pair is a property of the rig, not of the software — the X1PRO's Sound Learn rejected both
    * the vendor's own 1000/2000Hz pair and the synth cues as "too close" on this hardware, so
