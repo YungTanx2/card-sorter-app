@@ -23,8 +23,8 @@
   "captureCropZoomPct": 100,
   "captureCropVPosPct": 51,
   "soundEnabled": true,
-  "soundVolume": 0.6,
-  "soundPack": "tones",
+  "soundVolume": 1,
+  "soundPack": "synth",
   "toneAcceptHz": 941,
   "toneRejectHz": 1477,
   "toneDurationMs": 600,
@@ -33,7 +33,7 @@
   "toneRejectGain": 0.8,
   "toneAcceptMs": 600,
   "toneRejectMs": 600,
-  "toneSettleMs": 800,
+  "toneSettleMs": 1000,
   "csvColumns": [
     {
       "header": "TCGplayer Id",

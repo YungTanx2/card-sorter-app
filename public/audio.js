@@ -30,7 +30,7 @@ window.CardSorterAudio = (function () {
   'use strict';
 
   const DEFAULTS = {
-    soundEnabled: true, soundVolume: 0.6, soundPack: 'machine',
+    soundEnabled: true, soundVolume: 1, soundPack: 'synth',
     // Defaults for the "tones" pack — see TONES, resonanceRisk() and levelRisk() for the numbers.
     // 941/1477 is the ONE pair Sound Learn has ever accepted on this rig; 80ms is a real 80ms now
     // that the fade is a raised cosine. ACCEPT IS THE LOWER TONE ON PURPOSE — see levelRisk().
@@ -52,7 +52,7 @@ window.CardSorterAudio = (function () {
    * the wrong pack can be told apart from a device running stale cached JS — the two look
    * identical from the outside, and chasing the wrong one costs a deploy cycle each time.
    */
-  const BUILD = '2026-08-29-inverted-pair';
+  const BUILD = '2026-08-29-validated-defaults';
 
   let ctx = null;
   let master = null;
