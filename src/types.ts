@@ -424,13 +424,21 @@ export interface AppSettings {
    * both ~0.6s, everything else under 4% of peak — one octave apart with no harmonic clutter,
    * which is what makes them easy for a cheap mic and a threshold detector to tell apart.
    *
-   * `synth` plays two struck blocks: a double woodblock knock for accept (E5 -> C#5, 207ms) and
-   * a triple low thud for reject (A4 -> G4 -> F4, 252ms).
+   * `synth` plays a double woodblock knock for accept (E5 -> C#5, dry, 207ms) against a low
+   * ringing bell for reject (G4 -> E4, 602ms).
    *
-   * THE ACCEPT CUE IS THE ONLY SOUND THIS RIG HAS EVER CLASSIFIED RELIABLY, in either role and
-   * against every partner it has been given — a ka-ching, a second woodblock, and bells at three
-   * different pitches, each of which was misread about half the time. It carries accept because
-   * keeper-into-bulk is the error that costs you a card.
+   * Two rules came out of nine configurations, logged in full above lowBell() in audio.js.
+   *
+   * ONE cue must RING and the other must not. Two percussive cues have been refused by Sound
+   * Learn twice, the second time differing in strike count, mode ratios, register and mallet;
+   * only a ringing partner has ever got past the teach step.
+   *
+   * TWO, in every pairing that did teach, the HIGHER cue is the one that was then misread during
+   * runs — nine rows, no exceptions, and not a matter of absolute pitch either, since 932Hz
+   * failed as the higher cue of its pair while 941Hz worked as the lower cue of its. The reject
+   * bell is deliberately pitched BELOW the woodblock to test that, since the woodblock has been
+   * the lower cue in every experiment so far and its reliability has never been separated from
+   * its position.
    *
    * Everything sits between 300 and 941Hz. A micro-speaker is efficient only near its ~600-900Hz
    * resonance and rolls off on both sides: above it killed every high cue tried, below it killed

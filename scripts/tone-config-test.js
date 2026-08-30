@@ -391,12 +391,23 @@ console.log('\nthe synth pack — two struck blocks, and everything that separat
     Math.abs(acc.groups[0][0].lvl - 0.42) < 0.001 && Math.abs(acc.groups[1][0].lvl - 0.38) < 0.001,
     acc.groups.map((g) => g[0].lvl).join(', '));
 
-  check('reject is three descending thuds — A4, G4, F4',
-    rej.groups.length === 3
-    && Math.abs(rej.pitches[0] - 440.00) < 0.01
-    && Math.abs(rej.pitches[1] - 392.00) < 0.01
-    && Math.abs(rej.pitches[2] - 349.23) < 0.01,
+  check('reject is a low bell — G4 then E4',
+    rej.groups.length === 2
+    && Math.abs(rej.pitches[0] - 392.00) < 0.01 && Math.abs(rej.pitches[1] - 329.63) < 0.01,
     rej.pitches.map(Math.round).join(', '));
+
+  // ═══ THE INVERSION, WHICH IS THE POINT OF THIS BUILD ═══
+  //
+  // In all nine configurations tried on this rig, the HIGHER cue of the pair is the one that
+  // failed — no exceptions — and the woodblock has been the LOWER cue every single time. So
+  // "the woodblock is reliable" and "the lower cue is reliable" explain the evidence equally
+  // well, and nothing has ever separated them. The partner is now BELOW, so the proven cue is
+  // the higher one for the first time. If this assertion ever flips back, that experiment has
+  // been silently undone.
+  check('the proven cue is the HIGHER of the pair, for the first time',
+    Math.max.apply(null, acc.pitches) > Math.max.apply(null, rej.pitches),
+    'accept tops out at ' + Math.round(Math.max.apply(null, acc.pitches))
+    + 'Hz, reject at ' + Math.round(Math.max.apply(null, rej.pitches)) + 'Hz');
 
   // ═══ THE BAND ═══
   //
@@ -429,12 +440,15 @@ console.log('\nthe synth pack — two struck blocks, and everything that separat
   // mode ratios 3.30/3.95 against 3.45/4.36, identical envelopes, durations within 40ms, energy
   // within 1%. These four assertions are the deliberate answer to that refusal.
 
-  // 1. Strike count — categorical, and the one difference never yet offered to Sound Learn.
-  check('the cues differ in strike COUNT, not just in pitch',
-    acc.groups.length !== rej.groups.length,
-    acc.groups.length + ' vs ' + rej.groups.length + ' strikes');
+  // 1. One cue rings and the other does not. This is the difference that has ALWAYS been present
+  //    in a pairing Sound Learn accepted, and always absent from one it refused: two struck
+  //    blocks have now been rejected twice, the second time differing in strike count, mode
+  //    ratios, register and mallet. Whatever it compares, two percussive objects are one sound to
+  //    it however they are tuned. Only a ringing partner has ever got past the teach step.
+  check('one cue rings and the other does not (>2x length)', acc.acoustic * 2 < rej.acoustic,
+    Math.round(acc.acoustic * 1000) + 'ms vs ' + Math.round(rej.acoustic * 1000) + 'ms');
 
-  // 2. Mode structure: 2.20x/2.90x against 3.45x/4.36x.
+  // 2. Mode structure: bell ratios 2.76x/5.40x against block ratios 3.45x/4.36x.
   let closestRatio = 9;
   for (const a of acc.ratios.slice(1))
     for (const r of rej.ratios.slice(1))
@@ -463,10 +477,8 @@ console.log('\nthe synth pack — two struck blocks, and everything that separat
   check('the cue fundamentals stay 15% apart', closest > 0.15,
     pair + ' are only ' + Math.round(closest * 100) + '% apart');
 
-  // Both must stay impulsive and front-loaded. A dominant partial arriving late is the one
-  // property the working cue has never had; the ka-ching's arrived at t+115ms.
-  check('both cues are over inside 300ms', acc.acoustic <= 0.30 && rej.acoustic <= 0.30,
-    Math.round(acc.acoustic * 1000) + 'ms / ' + Math.round(rej.acoustic * 1000) + 'ms');
+  // A dominant partial arriving late is the one property the working cue has never had; the
+  // ka-ching's arrived at t+115ms and it was misread half the time.
   for (const nm of ['accept', 'reject']) {
     const m = nm === 'accept' ? acc : rej;
     check(nm + ' peaks on its first strike',
