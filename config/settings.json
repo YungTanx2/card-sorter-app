@@ -34,6 +34,10 @@
   "toneAcceptMs": 600,
   "toneRejectMs": 600,
   "toneSettleMs": 1000,
+  "synthAcceptHz": 659.25,
+  "synthAcceptGain": 0.42,
+  "synthRejectHz": 392,
+  "synthRejectGain": 0.5,
   "csvColumns": [
     {
       "header": "TCGplayer Id",

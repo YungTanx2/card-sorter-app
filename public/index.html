@@ -363,6 +363,42 @@
         collide. 941&nbsp;/&nbsp;1477 and 852&nbsp;/&nbsp;1336 are known-safe (DTMF).
       </p>
       <pre id="tone-config" class="hint" style="white-space:pre-wrap; word-break:break-word;"></pre>
+
+      <!-- Synth cue tuner. Lives here rather than in the raw-JSON editor because tuning by ear
+           needs the sound to change as you drag, and a JSON textarea can only change it on save. -->
+      <div style="margin:.75rem 0; padding:.75rem; border:1px solid var(--border); border-radius:6px;">
+        <p class="hint" style="margin-top:0;">
+          <strong>Synth cue tuner.</strong> Moves apply to the audio immediately and releasing a
+          slider plays that cue, so you can tune by ear without saving between attempts. Nothing is
+          persisted until <strong>Save cues</strong>. <strong>Restore validated</strong> puts back
+          the four numbers that sorted 240 cards with zero misroutes.
+        </p>
+        <p class="hint">
+          Each cue is two strikes falling a minor third, so one pitch and one level describe it —
+          the second strike is derived. Watch the <code>ceiling</code> line: above ~660&nbsp;Hz this
+          machine misreads a cue about half the time, and that rule cost ten configurations to find.
+        </p>
+
+        <label for="sa-hz">Accept pitch — <span class="slider-value" id="sa-hz-value"></span></label>
+        <input type="range" id="sa-hz" min="300" max="900" step="0.5" data-tune-cue="accept" />
+
+        <label for="sa-gain">Accept level — <span class="slider-value" id="sa-gain-value"></span></label>
+        <input type="range" id="sa-gain" min="0.05" max="0.55" step="0.01" data-tune-cue="accept" />
+
+        <label for="sr-hz">Reject pitch — <span class="slider-value" id="sr-hz-value"></span></label>
+        <input type="range" id="sr-hz" min="300" max="900" step="0.5" data-tune-cue="reject" />
+
+        <label for="sr-gain">Reject level — <span class="slider-value" id="sr-gain-value"></span></label>
+        <input type="range" id="sr-gain" min="0.05" max="0.55" step="0.01" data-tune-cue="reject" />
+
+        <pre id="synth-config" class="hint" style="white-space:pre-wrap; word-break:break-word;"></pre>
+        <div class="row">
+          <button class="secondary" id="synth-restore-btn">Restore validated</button>
+          <button class="secondary" id="synth-save-btn">Save cues</button>
+        </div>
+        <div id="synth-status" class="hint"></div>
+      </div>
+
       <div class="row">
         <button class="secondary" data-cue="accept">Accept (keeper / needed)</button>
         <button class="secondary" data-cue="reject">Reject (bulk / extra)</button>
@@ -434,6 +470,73 @@
     if (rig) rig.updateSettings(s);
     audio.configure(s);
     renderToneConfig();
+    // A save discards any half-dragged experiment, which is the right way round: the sliders are
+    // a scratchpad and the saved row is the truth.
+    synthDraft = null;
+    renderSynthTuner();
+  }
+
+  // ═══════════════════ SYNTH CUE TUNER ═══════════════════
+  //
+  // The sliders write to a DRAFT and push it straight into audio.configure(), so a move is audible
+  // before it is saved. appSettings is deliberately not touched until Save — a mid-drag value must
+  // never become the persisted configuration just because something else re-read settings, and the
+  // saved row is what the machine was taught against.
+
+  const SYNTH_SLIDERS = [
+    { id: 'sa-hz', key: 'synthAcceptHz', cue: 'accept', fmt: (v) => v.toFixed(1) + ' Hz  (' + noteName(v) + ')' },
+    { id: 'sa-gain', key: 'synthAcceptGain', cue: 'accept', fmt: (v) => v.toFixed(2) },
+    { id: 'sr-hz', key: 'synthRejectHz', cue: 'reject', fmt: (v) => v.toFixed(1) + ' Hz  (' + noteName(v) + ')' },
+    { id: 'sr-gain', key: 'synthRejectGain', cue: 'reject', fmt: (v) => v.toFixed(2) },
+  ];
+  let synthDraft = null;
+
+  const NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
+  /** Nearest equal-tempered note. A bare frequency is hard to reason about while dragging; a note
+   *  name makes "is this too high?" answerable at a glance against the E5/G4 the run validated. */
+  function noteName(hz) {
+    const semis = Math.round(12 * Math.log2(hz / 440));
+    return NOTE_NAMES[(((semis + 9) % 12) + 12) % 12] + (4 + Math.floor((semis + 9) / 12));
+  }
+
+  /** Current draft, seeded from saved settings and falling back to the validated four. */
+  function synthValues() {
+    if (synthDraft) return synthDraft;
+    const base = audio.SYNTH_VALIDATED || {};
+    synthDraft = {};
+    Object.keys(base).forEach((k) => {
+      synthDraft[k] = (appSettings && Number.isFinite(appSettings[k])) ? appSettings[k] : base[k];
+    });
+    return synthDraft;
+  }
+
+  function renderSynthTuner() {
+    const out = $('synth-config');
+    if (!out || !audio.synthConfig) return;
+    const v = synthValues();
+    SYNTH_SLIDERS.forEach((s) => {
+      const el = $(s.id);
+      if (!el) return;
+      // Never write back into the control being dragged — it fights the pointer on some browsers.
+      if (document.activeElement !== el) el.value = v[s.key];
+      const label = $(s.id + '-value');
+      if (label) label.textContent = s.fmt(Number(v[s.key]));
+    });
+    const c = audio.synthConfig();
+    const lines = [
+      'accept  ' + c.acceptHz + ' Hz -> ' + c.acceptTailHz + ' Hz   gain ' + c.acceptGain
+        + ' -> ' + c.acceptTailGain + '   peak ' + c.acceptPeak,
+      'reject  ' + c.rejectHz + ' Hz -> ' + c.rejectTailHz + ' Hz   gain ' + c.rejectGain
+        + ' -> ' + c.rejectTailGain + '   peak ' + c.rejectPeak,
+      '',
+      // Three independent failure modes, same shape as the tones panel above. A config can pass
+      // any two and fail the third, so they get three lines rather than one verdict.
+      'ceiling   ' + (c.ceiling ? 'RISK - ' + c.ceiling : 'safe - both cues at or under 660 Hz'),
+      'spacing   ' + (c.spacing ? 'RISK - ' + c.spacing : 'safe - the two pitches are well apart'),
+      'clipping  ' + (c.clipping ? 'RISK - ' + c.clipping : 'safe - both cues peak under 1.0'),
+    ];
+    out.textContent = lines.join(String.fromCharCode(10));
+    out.style.color = (c.ceiling || c.spacing || c.clipping) ? 'var(--red)' : '';
   }
 
   /** Reports the tone pair actually in effect and whether it is safe from harmonic collision.
@@ -988,6 +1091,48 @@
     el.style.display = 'block';
     el.textContent = JSON.stringify(audio.diagnostics(), null, 2);
   });
+  SYNTH_SLIDERS.forEach((s) => {
+    const el = $(s.id);
+    if (!el) return;
+    el.addEventListener('input', () => {
+      synthValues()[s.key] = Number(el.value);
+      // configure() reads only the keys it recognises, so a four-key partial is safe here and
+      // leaves the rest of the saved configuration alone.
+      audio.configure(synthDraft);
+      renderSynthTuner();
+    });
+    // 'change' fires on release; 'input' fires on every pixel of the drag. Playing on input would
+    // schedule hundreds of overlapping cues and tell you nothing.
+    el.addEventListener('change', async () => {
+      audio.unlock();
+      await audio.whenReady();
+      audio.play(s.cue);
+      $('synth-status').textContent = 'Played ' + s.cue + ' — not saved yet.';
+    });
+  });
+  $('synth-restore-btn').addEventListener('click', () => {
+    synthDraft = Object.assign({}, audio.SYNTH_VALIDATED);
+    audio.configure(synthDraft);
+    renderSynthTuner();
+    $('synth-status').textContent = 'Restored the four validated numbers — not saved yet.';
+  });
+  $('synth-save-btn').addEventListener('click', async () => {
+    try {
+      const merged = Object.assign({}, appSettings, synthValues());
+      applySettings(await api('/api/settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(merged),
+      }));
+      // The machine holds templates, not settings. Saving a cue the X1PRO has not been taught is
+      // exactly how a run sorts backwards, so say so every time rather than trusting memory.
+      $('synth-status').textContent = 'Saved. RE-TEACH Sound Learn before the next run — the '
+        + 'machine still holds the old templates.';
+    } catch (err) {
+      $('synth-status').textContent = 'Error: ' + err.message;
+    }
+  });
+
   $('settings-save-btn').addEventListener('click', async () => {
     try {
       const parsed = JSON.parse($('settings-json').value);

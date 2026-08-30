@@ -526,6 +526,88 @@ console.log('\nconfig/settings.json ships the configuration that actually routes
   check('toneSettleMs covers the longer cue', shipped.toneSettleMs >= longest,
     'settle ' + shipped.toneSettleMs + 'ms vs cue ' + Math.round(longest) + 'ms');
 }
+console.log('\nthe synth cue tuner — settings reach the cues, and the guards catch a bad drag');
+{
+  // The sliders exist so the cues can be retuned by ear. That makes it possible to walk a
+  // configuration that took ten experiments to find straight back into a broken one, so what is
+  // asserted here is that the settings actually reach the oscillators and that each rule is
+  // reported before it is saved.
+  const A = load();
+  const validated = A.SYNTH_VALIDATED;
+
+  check('the shipped defaults ARE the validated four',
+    validated.synthAcceptHz === 659.25 && validated.synthAcceptGain === 0.42
+    && validated.synthRejectHz === 392.00 && validated.synthRejectGain === 0.50,
+    JSON.stringify(validated));
+
+  const shipped = JSON.parse(
+    fs.readFileSync(path.join(__dirname, '..', 'config', 'settings.json'), 'utf8'));
+  for (const k of Object.keys(validated)) {
+    check('config/settings.json ships the validated ' + k, shipped[k] === validated[k],
+      'file ' + shipped[k] + ' vs validated ' + validated[k]);
+  }
+
+  // The derived second strike must reproduce the run's measured numbers exactly, or the defaults
+  // are no longer the configuration that sorted 240 cards.
+  const d = A.synthConfig();
+  check('the derived second strikes match the validated run',
+    Math.abs(d.acceptTailHz - 554.37) < 0.02 && Math.abs(d.rejectTailHz - 329.63) < 0.02
+    && Math.abs(d.acceptTailGain - 0.38) < 0.01 && Math.abs(d.rejectTailGain - 0.44) < 0.01,
+    d.acceptTailHz + 'Hz/' + d.acceptTailGain + ', ' + d.rejectTailHz + 'Hz/' + d.rejectTailGain);
+  check('the validated configuration trips no guard',
+    !d.ceiling && !d.spacing && !d.clipping,
+    [d.ceiling, d.spacing, d.clipping].filter(Boolean).join(' | '));
+
+  // A slider move must reach the OSCILLATOR, not just the config object. Those are different
+  // facts and only the second one changes what the machine hears.
+  {
+    const log = [];
+    const B = load(log);
+    B.configure({ soundEnabled: true, soundVolume: 1, soundPack: 'synth',
+      synthAcceptHz: 500, synthAcceptGain: 0.30 });
+    B.play('accept');
+    const freqs = log.filter((e) => e[0] === 'freq').map((e) => e[1]).sort((a, b) => a - b);
+    const levels = log.filter((e) => e[0] === 'ramp').map((e) => e[1]);
+    check('a pitch change reaches the scheduled oscillators',
+      freqs.some((f) => Math.abs(f - 500) < 0.01), freqs.map(Math.round).join(', '));
+    check('the second strike follows the first down a minor third',
+      freqs.some((f) => Math.abs(f - 500 * Math.pow(2, -3 / 12)) < 0.02),
+      freqs.map(Math.round).join(', '));
+    check('a level change reaches the scheduled envelope',
+      levels.some((v) => Math.abs(v - 0.30) < 0.001), levels.join(', '));
+  }
+
+  // ═══ THE GUARDS ═══
+  //
+  // Rule 2 from the ten-configuration log: every pitch at or below 659Hz has worked and every one
+  // at or above 784Hz has been misread about half the time. A slider crosses that in one drag.
+  check('a pitch above 660Hz is flagged', !!A.synthCeilingRisk(800, 392));
+  check('the reject cue is checked too, not just accept', !!A.synthCeilingRisk(659.25, 780));
+  check('660Hz exactly is still clear', !A.synthCeilingRisk(660, 392));
+  check('the validated pitches are clear', !A.synthCeilingRisk(659.25, 392));
+  check('the message names the offending cue',
+    /accept at 800Hz/.test(A.synthCeilingRisk(800, 392)));
+
+  check('two cues converging in pitch are flagged', !!A.synthSpacingRisk(500, 480));
+  check('the validated pair is well apart', !A.synthSpacingRisk(659.25, 392));
+
+  // Clipping is silent: nothing downstream limits at soundVolume 1, and an over-unity cue simply
+  // becomes a different sound from the one Sound Learn was taught.
+  check('a gain that sums over unity is flagged', !!A.synthClipRisk(0.55, 0.55));
+  check('the validated gains are clear', !A.synthClipRisk(0.42, 0.50));
+
+  // Clamps stop nonsense; the guards report danger. A slider that refuses to reach 700Hz would
+  // make the band unexplorable, which is why the clamp is 900 and the warning is at 660.
+  const C = load();
+  C.configure({ synthAcceptHz: 5000, synthRejectHz: 10, synthAcceptGain: 9, synthRejectGain: 0 });
+  const c = C.synthConfig();
+  check('pitch clamps to the range this speaker can produce',
+    c.acceptHz === 900 && c.rejectHz === 300, c.acceptHz + ', ' + c.rejectHz);
+  check('gain clamps below the clipping point',
+    c.acceptGain === 0.55 && c.rejectGain === 0.05, c.acceptGain + ', ' + c.rejectGain);
+  check('a clamped-but-dangerous pitch still raises the ceiling flag', !!c.ceiling);
+}
+
 
 
 
