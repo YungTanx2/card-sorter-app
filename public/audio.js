@@ -9,11 +9,11 @@
  *                        pure 1000Hz sine, both ~0.6s, every other frequency <=4% of peak.
  *                        Exactly one octave apart with no harmonic clutter — about the easiest
  *                        pair a cheap mic plus threshold detector could be asked to separate.
- *   "synth"              Two struck blocks: a double woodblock knock for accept, a triple
- *                        low thud for reject. Nicer across a 250-card pile, and this rig HAS
- *                        taught Sound Learn on it — in which case these cues become the
- *                        templates and the tone settings stop applying. Everything sits between
- *                        300 and 941Hz; see logdrum() for the elimination that got here.
+ *   "synth"              A double woodblock knock for accept, a low ringing bell for reject.
+ *                        Nicer across a 250-card pile, and this rig HAS taught Sound Learn on
+ *                        it — in which case these cues become the templates and the tone
+ *                        settings stop applying. Everything sits between 300 and 941Hz; see
+ *                        lowBell() for the nine-configuration log that got here.
  *
  * Which to use is a real decision, not a preference. In Phase 2 the tone stops being operator
  * feedback and becomes the machine's control signal, and a decorative sound layered onto a
@@ -52,7 +52,7 @@ window.CardSorterAudio = (function () {
    * the wrong pack can be told apart from a device running stale cached JS — the two look
    * identical from the outside, and chasing the wrong one costs a deploy cycle each time.
    */
-  const BUILD = '2026-08-29-block-and-drum';
+  const BUILD = '2026-08-29-inverted-pair';
 
   let ctx = null;
   let master = null;
@@ -401,60 +401,59 @@ window.CardSorterAudio = (function () {
   }
 
   /**
-   * The low drum's modes: [ratio, level, decay scale].
+   * A struck low bell — the same bell() machinery, pitched UNDER the woodblock.
    *
-   * A SECOND percussive voice, because the woodblock is the only sound this machine has ever
-   * classified reliably and every attempt to pair it with something else has failed:
+   * ═══ WHY THE PARTNER IS NOW BELOW, AND WHY THAT IS THE POINT ═══
    *
-   *     partner            pitch of the partner   Sound Learn   in-run
-   *     ka-ching           1046/1568Hz            accepted      partner wrong ~50%
-   *     high woodblock     1046/1244Hz            REFUSED       -
-   *     bell Eb6/G6        1244/1568Hz            accepted      partner wrong ~50%
-   *     bell G5/A#5         784/932Hz             accepted      partner wrong ~50%
+   * The full log, which is worth reading before changing anything here:
    *
-   * That last row is the one that ruled out a simple frequency ceiling. 932Hz is within 1% of the
-   * 941Hz tone the tones pack has never had trouble with, and it still failed. So the variable is
-   * not pitch alone — the woodblock at 554/659Hz keeps working while everything else in the room,
-   * at any pitch tried, does not.
+   *     accept cue      reject cue      teach      run              higher cue
+   *     2000 sine       1000 sine       REFUSED    -                accept
+   *     1750 sine       1100 sine       REFUSED    -                accept
+   *     1477 sine        941 sine       accepted   1477 dropped     accept  <- failed
+   *     ka-ching        thunk           REFUSED    -                accept
+   *     ka-ching        woodblock       accepted   ka-ching ~50%    accept  <- failed
+   *     high block      low block       REFUSED    -                accept
+   *     bell Eb6/G6     woodblock       accepted   bell ~50%        accept  <- failed
+   *     bell G5/A#5     woodblock       accepted   bell ~50%        accept  <- failed
+   *     woodblock       low drum x3     REFUSED    -                accept
    *
-   * What is left after that elimination is the KIND of sound. The woodblock is short, dry, dense
-   * and percussive; every partner it has been given has been longer, or softer-edged, or both.
-   * So this voice is built to be the same kind of thing — another struck block — and the pair is
-   * separated on everything except that.
+   * Two facts fall out of it that no single row shows.
    *
-   * ═══ THE RISK, NAMED ═══
+   * ONE: in every pairing that taught, THE HIGHER CUE IS THE ONE THAT FAILED. Nine rows, no
+   * exceptions, and never once the lower one. It is not absolute pitch either — 932Hz failed as
+   * the higher cue of its pair while 941Hz worked as the lower cue of its. Nine hertz apart,
+   * opposite outcomes. Whatever is wrong is about POSITION WITHIN THE PAIR.
    *
-   * Two blocks have been refused once already, as too similar. That pair differed only in pitch:
-   * mode ratios of 3.30/3.95 against 3.45/4.36, identical envelopes, durations within 40ms, energy
-   * within 1%. This one differs in strike COUNT (three against two), mode ratios (2.20/2.90
-   * against 3.45/4.36, a 19% minimum gap), register (26% at the closest fundamentals) and mallet
-   * (lowpass against highpass). If Sound Learn refuses again, the next thing to vary is the strike
-   * count further — a single knock against a triple — since that is the one difference it has
-   * never been offered.
+   * TWO: a percussive partner will not teach. Two blocks have been refused twice, the second time
+   * differing in strike count, mode ratios, register and mallet. Whatever Sound Learn compares,
+   * two struck objects are one sound to it however they are tuned. Only a ringing partner has
+   * ever got past the teach step.
    *
-   * Ratios 2.20x and 2.90x rather than the woodblock's 3.45x and 4.36x also do useful acoustic
-   * work: they pull this voice's upper modes down to 768-1276Hz, so a drum whose fundamental sits
-   * at 349-440Hz — below the speaker's efficient range — still puts real energy inside it.
+   * ═══ SO THIS IS A TEST AS MUCH AS A FIX ═══
+   *
+   * The woodblock has been the LOWER cue in every experiment ever run here. That means "the
+   * woodblock is reliable" and "the lower cue is reliable" fit all nine rows equally well, and
+   * nothing yet distinguishes them. This build inverts it: a bell below the woodblock, so the
+   * proven cue is the higher one for the first time.
+   *
+   *   the bell fails again    -> the fault belongs to the bell, and position was a coincidence
+   *   the WOODBLOCK fails     -> the fault is positional, the woodblock was never special, and
+   *                              the fix is level compensation on whichever cue sits higher
+   *   both work               -> the bell was simply too high in all three previous attempts
+   *
+   * All three outcomes are worth a deploy, which has not been true of the last few rounds.
+   *
+   * G4/E4 puts the fundamentals at 392 and 330Hz, below the speaker's efficient band, so the
+   * 2.76x partials at 1082 and 910Hz do the radiating — 910Hz sits inside the band. Its gain is
+   * the higher of the two for the reason levelRisk() generalises: a
+   * micro-speaker rolls off on BOTH sides of resonance, and this cue is the one further from it.
    */
-  const LOGDRUM_MODES = [
-    // ratio  level  decay
-    [1.00,    1.00,  1.00],
-    [2.20,    0.34,  0.46],
-    [2.90,    0.18,  0.28],
-  ];
-
-  /** A struck low drum. Same machinery as woodblock(), deliberately different proportions. */
-  function logdrum(c, at, hz, gain, decay) {
-    // Soft beater, where the woodblock's is a hard tip. The two cues must not share an onset:
-    // they did once, matched to under one percent, and that is what the highpass/lowpass split
-    // exists to prevent.
-    burst(c, { at: at, gain: gain * 0.45, decay: 0.024, filterType: 'lowpass', cutoff: 1200 });
-    for (let i = 0; i < LOGDRUM_MODES.length; i++) {
-      voice(c, {
-        type: 'sine', freq: hz * LOGDRUM_MODES[i][0], gain: gain * LOGDRUM_MODES[i][1],
-        at: at, decay: decay * LOGDRUM_MODES[i][2],
-      });
-    }
+  function lowBell(c, at, hz, gain, decay) {
+    // A soft beater, opposite to the woodblock's hard tip. These two cues shared an onset once,
+    // matched to under one percent, and the highpass/lowpass split exists to prevent that return.
+    burst(c, { at: at, gain: gain * 0.30, decay: 0.026, filterType: 'lowpass', cutoff: 1200 });
+    bell(c, at, hz, gain, decay);
   }
 
 
@@ -479,9 +478,11 @@ window.CardSorterAudio = (function () {
      * on the decision you cannot afford to get wrong — the same argument that swapped the tones
      * pack's mapping in the first place.
      *
-     * There is no rising contour here any more, because the cue that had one was the cue that
-     * kept failing. Both cues now fall; they are told apart by what they are, not by which way
-     * they move. See logdrum() for what carries the discrimination instead.
+     * It is also, for the first time in this file's history, the HIGHER of the two cues — and
+     * that is deliberate. In all nine configurations tried so far the woodblock has been the
+     * lower one, which means "the woodblock is reliable" and "the lower cue is reliable" explain
+     * the evidence equally well and nothing has ever separated them. lowBell() sets out what each
+     * possible outcome of inverting it would prove.
      */
     accept: function (c, t) {
       woodblock(c, t,        659.25, 0.42, 0.075); // E5
@@ -549,10 +550,9 @@ window.CardSorterAudio = (function () {
      * the speaker.
      */
     reject: function (c, t) {
-      logdrum(c, t,        440.00, 0.54, 0.085); // A4
-      logdrum(c, t + 0.075, 392.00, 0.50, 0.085); // G4
-      logdrum(c, t + 0.150, 349.23, 0.46, 0.090); // F4
-      return 0.26;
+      lowBell(c, t,        392.00, 0.50, 0.42); // G4
+      lowBell(c, t + 0.10, 329.63, 0.44, 0.50); // E4, a minor third down, rings longer
+      return 0.62;
     },
 
     /** ALERT — the run stalled and needs hands. Three alternating square pulses, and the only
