@@ -505,6 +505,28 @@ console.log('\nthe synth pack — two struck blocks, and everything that separat
       'peaks at ' + Math.round(peak * 1000) / 1000);
   }
 }
+console.log('\nconfig/settings.json ships the configuration that actually routes cards');
+{
+  // A 240-card run (39 keepers) sorted with zero misroutes on soundPack "synth", soundVolume 1.
+  // A saved app_settings row shadows this file, so production does not depend on it — but if that
+  // row is ever lost, or a fresh environment is set up, the app must come up on the configuration
+  // that works rather than a different one. The `tones` and `machine` packs both have documented
+  // Sound Learn failures on this rig, so neither is a safe default any more.
+  const shipped = JSON.parse(
+    fs.readFileSync(path.join(__dirname, '..', 'config', 'settings.json'), 'utf8'));
+  check('soundPack ships as the validated "synth"', shipped.soundPack === 'synth',
+    'got ' + shipped.soundPack);
+  check('soundVolume ships at full', shipped.soundVolume === 1, 'got ' + shipped.soundVolume);
+
+  // The settle must outlast the longer cue, or the next capture starts while the machine is still
+  // hearing this one. The reject bell returns 620ms.
+  const A = load();
+  A.configure({ soundEnabled: true, soundVolume: 1, soundPack: 'synth' });
+  const longest = Math.max(A.play('accept'), A.play('reject')) * 1000 + 150;
+  check('toneSettleMs covers the longer cue', shipped.toneSettleMs >= longest,
+    'settle ' + shipped.toneSettleMs + 'ms vs cue ' + Math.round(longest) + 'ms');
+}
+
 
 
 
