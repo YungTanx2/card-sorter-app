@@ -108,19 +108,25 @@ export function completeGoal(id: string): Goal {
 }
 
 /**
- * Hard-deletes a goal and everything derived from it. Needed because a goal's printing and
- * target are fixed at creation — get either wrong and the goal is permanently useless, so
- * without this the only remedy is editing SQLite by hand.
+ * Everything derived from a goal — its progress, its runs, and the frames captured during them.
+ * Leaves the goals row itself alone, so deleteGoal() and resetGoal() can share it.
  *
- * Wrapped in a transaction: goal_cards rows ARE the progress (there is no counter to fall back
- * on), so a partial delete would leave orphaned scan rows that no goal can ever surface again.
- * Deliberately does not touch tcgcsv_cache or embedding_cache — those are shared with the
+ * Shared rather than duplicated specifically BECAUSE the order is load-bearing and invisible:
+ * PRAGMA foreign_keys is off (see the capture_samples comment in db.ts), so a REFERENCES clause
+ * cascades nothing and each delete has to name its own children. Two hand-maintained copies of
+ * that order would drift the first time a table is added, and the failure mode is silent —
+ * orphaned rows no screen can surface.
+ *
+ * Deliberately does not touch tcgcsv_cache or embedding_cache: those are shared with the
  * price-sorter and expensive to rebuild.
+ *
+ * Callers must be inside a transaction. goal_cards rows ARE the progress — there is no counter
+ * to fall back on — so a partial purge leaves a goal reporting a count matching neither the old
+ * state nor the new one.
  */
-export const deleteGoal = db.transaction((id: string) => {
-  // Before capture_samples, since labels hang off sample ids; before goal_cards, since samples
-  // hang off card ids. Explicit because foreign_keys is off — see the capture_samples comment in
-  // db.ts; a REFERENCES clause alone would silently orphan these rows.
+function purgeGoalDerived(id: string): void {
+  // Labels before samples (labels hang off sample ids); samples before cards (samples hang off
+  // card ids). Adjustments are goal-scoped rather than run-scoped, so they key off goal_id.
   db.prepare(`DELETE FROM capture_labels WHERE capture_sample_id IN
     (SELECT s.id FROM capture_samples s JOIN goal_cards c ON c.id = s.goal_card_id WHERE c.goal_id = ?)`).run(id);
   db.prepare(`DELETE FROM capture_samples WHERE goal_card_id IN
@@ -128,7 +134,40 @@ export const deleteGoal = db.transaction((id: string) => {
   db.prepare('DELETE FROM goal_cards WHERE goal_id = ?').run(id);
   db.prepare('DELETE FROM goal_adjustments WHERE goal_id = ?').run(id);
   db.prepare('DELETE FROM goal_sessions WHERE goal_id = ?').run(id);
+}
+
+/**
+ * Hard-deletes a goal and everything derived from it. Needed because a goal's printing and
+ * target are fixed at creation — get either wrong and the goal is permanently useless, so
+ * without this the only remedy is editing SQLite by hand.
+ */
+export const deleteGoal = db.transaction((id: string) => {
+  purgeGoalDerived(id);
   db.prepare('DELETE FROM goals WHERE id = ?').run(id);
+});
+
+/**
+ * Wipes a goal's progress but keeps the goal. The "collect this set again from scratch" action.
+ *
+ * Exists because delete-and-recreate was the only way to redo a set, and that throws away the
+ * configuration — sets, printing, target copies, excluded rarities, binder dimensions — which is
+ * the part normally worth keeping. Recreating it by hand also risks entering a DIFFERENT printing
+ * or target, which is unrecoverable in the other direction.
+ *
+ * Clears goal_adjustments, unlike deleteGoalSession(). That function leaves them deliberately:
+ * adjustments are manual corrections with no relationship to which run was open. Here the scope
+ * is the whole goal, and surviving adjustments would give a freshly-reset set owned counts with
+ * no scans behind them — precisely the unexplainable state a reset exists to escape.
+ *
+ * Reopens a completed goal: zero progress with a 'complete' status is a contradiction, and
+ * wanting to collect it again is the only reason to reset a finished one.
+ */
+export const resetGoal = db.transaction((id: string): Goal => {
+  purgeGoalDerived(id);
+  updateGoalStatus.run('active', Date.now(), id);
+  const goal = getGoal(id);
+  if (!goal) throw new Error(`Goal ${id} not found`);
+  return goal;
 });
 
 // ---- derived progress ----

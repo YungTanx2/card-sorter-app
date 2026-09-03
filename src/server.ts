@@ -15,7 +15,7 @@ import {
   listSessionSummaries, deleteSession, getSessionDeletionImpact,
 } from './session';
 import {
-  createGoal, getGoal, listGoals, completeGoal, deleteGoal, getGoalProgress, getMissingList, adjustGoal,
+  createGoal, getGoal, listGoals, completeGoal, deleteGoal, resetGoal, getGoalProgress, getMissingList, adjustGoal,
   createGoalSession, getGoalSession, listGoalSessions, resumeGoalSession, completeGoalSession,
   saveCaptureSample, getCaptureSamples, getCaptureSampleFrame, fetchRaritySlotCounts,
   scanGoalCard, getGoalCardsForSession, getGoalCardThumb, setGoalCardVoid,
@@ -370,6 +370,13 @@ app.post('/api/goals/:id/adjust', (req, res) => {
 app.post('/api/goals/:id/complete', (req, res) => {
   if (!requireGoal(req, res)) return;
   res.json(completeGoal(req.params.id));
+});
+
+/** Clears progress and runs, keeps the goal and its configuration. POST rather than DELETE: the
+ *  goal survives, and the response is the reopened goal so the client can re-render from it. */
+app.post('/api/goals/:id/reset', (req, res) => {
+  if (!requireGoal(req, res)) return;
+  res.json(resetGoal(req.params.id));
 });
 
 app.delete('/api/goals/:id', (req, res) => {
