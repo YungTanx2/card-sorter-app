@@ -125,12 +125,30 @@
   .stall-banner p { font-size: 0.85rem; margin-bottom: 0.6rem; }
   .run-actions { display: flex; gap: 0.6rem; margin-top: 1rem; }
   .run-actions button { flex: 1; }
+  /* Stacks two destructive actions instead of sitting them side by side. Half-width buttons wrap
+     their armed confirm text on a phone, and adjacent reset/delete targets are exactly the pair
+     you don't want a thumb to choose between. */
+  .run-actions.stack { flex-direction: column; }
 
   ul.results { list-style: none; margin-top: 1rem; }
   ul.results li { padding: 0.6rem 0; border-bottom: 1px solid var(--border); font-size: 0.85rem; display: flex; justify-content: space-between; gap: 0.5rem; align-items: center; }
   ul.results li .tag { font-size: 0.7rem; padding: 0.1rem 0.4rem; border-radius: 4px; white-space: nowrap; }
   ul.results li .tag.needed { background: rgba(34,197,94,0.2); color: var(--green); }
   ul.results li .tag.extra  { background: rgba(239,68,68,0.2); color: var(--red); }
+
+  /* Missing-list thumbnails. Scoped to #missing-list rather than ul.results because the other
+     two lists using that class are text-only and shouldn't inherit a picture column.
+
+     The placeholder shares every box property with the img so a card TCGCSV has no photo for
+     still occupies a row of the same height — a collapsed row breaks the vertical rhythm that
+     makes a 200-row list scannable, and this list is meant to be read while holding cards. */
+  #missing-list li .thumb {
+    width: 3rem; flex: none; aspect-ratio: 5 / 7; border-radius: 4px;
+    border: 1px solid var(--border); background: #000; object-fit: cover; display: block;
+  }
+  #missing-list li span.thumb { background: var(--surface2); }
+  /* Takes the slack so the count tag stays pinned right once there are three children. */
+  #missing-list li .who { flex: 1; min-width: 0; }
   details summary { cursor: pointer; color: var(--muted); font-size: 0.85rem; margin-top: 1rem; }
 
   .dry-badge {
@@ -315,10 +333,11 @@
       <div id="run-error"></div>
       <button class="primary" id="start-run-btn">Start run</button>
 
-      <div class="run-actions">
+      <div class="run-actions stack">
+        <button class="secondary" id="reset-goal-btn">Reset progress</button>
         <button class="secondary danger" id="delete-goal-btn">Delete goal</button>
       </div>
-      <p class="hint">A goal's printing and target are fixed at creation — if either is wrong, delete it and start over. This removes its scan history too, since that history <em>is</em> its progress.</p>
+      <p class="hint"><strong>Reset</strong> puts every slot back to empty and reopens the goal, keeping its sets, printing, target and binder layout — for collecting the same set again. <strong>Delete</strong> removes the goal itself; a goal's printing and target are fixed at creation, so if either is wrong that's the only fix. Both clear the scan history, since that history <em>is</em> the progress.</p>
 
       <details id="past-sessions-wrap" hidden>
         <summary>Past runs on this goal</summary>
@@ -662,6 +681,39 @@
       (p ? ` — ${p.filledSlots} of ${p.totalSlots} slots filled` : '');
     loadPastSessions();
   }
+
+  /**
+   * Same two-step confirm as delete, for the same reasons — plus one specific to reset: it reads
+   * as far more reversible than it is, so the armed label names what it destroys. The count comes
+   * from currentProgress, already fetched by selectGoal(), rather than a dedicated impact
+   * endpoint: totalCopiesOwned is exactly the number about to go to zero.
+   */
+  let resetArmed = false;
+  $('reset-goal-btn').addEventListener('click', async () => {
+    const btn = $('reset-goal-btn');
+    if (!resetArmed) {
+      resetArmed = true;
+      const n = currentProgress ? currentProgress.totalCopiesOwned : 0;
+      btn.textContent = `Really reset — clears ${n} card${n === 1 ? '' : 's'}, tap again`;
+      setTimeout(() => { resetArmed = false; btn.textContent = 'Reset progress'; }, 5000);
+      return;
+    }
+    resetArmed = false;
+    btn.disabled = true;
+    try {
+      // Re-select from the server's returned goal rather than patching what's on screen: a reset
+      // also reopens a completed goal and drops every past run, so currentGoal, currentProgress
+      // and the past-runs list are all stale at once. selectGoal refreshes all three.
+      const goal = await api('/api/goals/' + currentGoal.id + '/reset', { method: 'POST' });
+      await loadGoals();
+      await selectGoal(goal);
+    } catch (err) {
+      $('run-error').innerHTML = `<div class="error-box">${esc(err.message)}</div>`;
+    } finally {
+      btn.disabled = false;
+      btn.textContent = 'Reset progress';
+    }
+  });
 
   /** Two-step confirm rather than window.confirm(): a native modal blocks the page entirely,
    *  which is both worse on a phone mid-run and impossible to drive from automation. */
@@ -1226,8 +1278,14 @@
     }
     for (const s of missing) {
       const li = document.createElement('li');
+      // loading="lazy" is doing real work here, unlike in the binder: that renders one page of
+      // at most a dozen pockets, while an untouched full-set goal lands 200+ rows in this list
+      // at once. Without it that's 200 CDN requests fired before the first row is readable.
       li.innerHTML =
-        `<span>${esc(s.number || '—')} · ${esc(s.name)}<br><span class="hint">p${s.page} · pocket ${s.pocket}</span></span>` +
+        (s.imageUrl
+          ? `<img class="thumb" src="${esc(s.imageUrl)}" alt="" loading="lazy" decoding="async" />`
+          : '<span class="thumb"></span>') +
+        `<span class="who">${esc(s.number || '—')} · ${esc(s.name)}<br><span class="hint">p${s.page} · pocket ${s.pocket}</span></span>` +
         `<span class="tag extra">${s.owned}/${s.target}</span>`;
       ul.appendChild(li);
     }
