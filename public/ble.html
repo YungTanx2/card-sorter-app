@@ -270,7 +270,20 @@
       log('never reached READY (' + s.machine_state + ', scanner_link ' + s.scanner_link + ') — trying batch.start anyway');
     }
     renderDevice(s);
-    await cmd('batch.start', { mode: 'continuous', target_count: 0, sound_enabled: false });
+
+    // Firmware 0.3.25 rejected a bare {mode, target_count, sound_enabled:false} as
+    // NONCANONICAL_REQUEST. The vendor never sends that shape to extensibility-v1 firmware: it
+    // echoes the device's OWN sound_enabled from settings.get, and attaches the device's motion
+    // profile from motion.get with dock_ms forced to 0. Mirror that exactly, keys in their order.
+    const settings = await cmd('settings.get');
+    if (settings.kind !== 'machine_settings' || !settings.settings) throw new Error('settings.get: unexpected reply ' + settings.kind);
+    const args = { mode: 'continuous', target_count: 0, sound_enabled: settings.settings.sound_enabled === true };
+    if (conn.capabilities.extensibilityVersion === 1) {
+      const motion = await cmd('motion.get');
+      if (motion.kind !== 'motion_settings' || !motion.profile) throw new Error('motion.get: unexpected reply ' + motion.kind);
+      args.motion_profile = { ...motion.profile, dock_ms: 0 };
+    }
+    await cmd('batch.start', args);
     const ready = await conn.waitFor(
       (st) => st.machine_state === 'PREPARE_WINDOW' && st.run_request === 'RUNNING' && st.batch_active === true,
       4500, 'BATCH_START');
