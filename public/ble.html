@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+<title>X1PRO Bluetooth Probe</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg: #0f1117;
+    --surface: #1a1d27;
+    --surface2: #222636;
+    --border: #2d3148;
+    --text: #e2e8f0;
+    --muted: #8892a4;
+    --accent: #6366f1;
+    --green: #22c55e;
+    --red: #ef4444;
+    --yellow: #eab308;
+  }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: var(--bg); color: var(--text); min-height: 100vh;
+    display: flex; flex-direction: column;
+  }
+
+  header {
+    display: flex; align-items: center; gap: 0.5rem; padding: 0.75rem 1rem;
+    background: var(--surface); border-bottom: 1px solid var(--border);
+    position: sticky; top: 0; z-index: 10;
+  }
+  header h1 { font-size: 1rem; font-weight: 600; margin-right: auto; }
+  header nav { display: flex; gap: 0.35rem; flex-wrap: wrap; }
+  header nav a.nav-link {
+    display: inline-flex; align-items: center; color: var(--accent); border: 1px solid var(--border);
+    border-radius: 6px; padding: 0.35rem 0.6rem; font-size: 0.8rem; text-decoration: none;
+  }
+
+  main { flex: 1; padding: 1rem; max-width: 720px; width: 100%; margin: 0 auto; }
+  section { background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+    padding: 0.85rem; margin-bottom: 0.85rem; }
+  h2 { font-size: 0.95rem; margin-bottom: 0.5rem; }
+  .row { display: flex; gap: 0.4rem; flex-wrap: wrap; margin-top: 0.5rem; }
+
+  button {
+    background: var(--surface2); color: var(--text); border: 1px solid var(--border);
+    border-radius: 8px; padding: 0.6rem 0.85rem; font-size: 0.85rem; cursor: pointer;
+  }
+  button.primary { background: var(--accent); border-color: var(--accent); color: white; font-weight: 600; }
+  button.danger { background: var(--red); border-color: var(--red); color: white; }
+  button:disabled { opacity: 0.4; cursor: default; }
+
+  .hint { font-size: 0.78rem; color: var(--muted); line-height: 1.4; }
+  .pill { display: inline-block; font-size: 0.75rem; padding: 0.15rem 0.5rem; border-radius: 999px;
+    border: 1px solid var(--border); color: var(--muted); }
+  .pill.ok { color: var(--green); border-color: var(--green); }
+  .pill.bad { color: var(--red); border-color: var(--red); }
+
+  dl { display: grid; grid-template-columns: max-content 1fr; gap: 0.2rem 0.75rem; font-size: 0.8rem; }
+  dt { color: var(--muted); }
+  dd { font-family: ui-monospace, monospace; word-break: break-all; }
+
+  pre { background: #0b0d12; border: 1px solid var(--border); border-radius: 8px; padding: 0.6rem;
+    font-size: 0.72rem; line-height: 1.35; overflow-x: auto; white-space: pre-wrap; word-break: break-all;
+    max-height: 22rem; overflow-y: auto; }
+  .error-box { background: #3a1a1a; border: 1px solid var(--red); color: #fca5a5;
+    border-radius: 8px; padding: 0.6rem; margin-top: 0.5rem; font-size: 0.82rem; }
+</style>
+</head>
+<body>
+<header>
+  <h1>X1PRO Bluetooth Probe</h1>
+  <nav>
+    <a class="nav-link" href="/">Sorter</a>
+    <a class="nav-link" href="/sets.html">Set Builder</a>
+    <a class="nav-link" href="/runs.html">Runs</a>
+  </nav>
+</header>
+
+<main>
+  <section>
+    <h2>1. Connect <span id="conn-pill" class="pill">disconnected</span></h2>
+    <p class="hint">
+      Chrome on Android, Bluetooth on, X1PRO powered and not connected to any other phone or tab
+      (close mtg.tcgverifier.com first). Pick the X1PRO in the dialog, then accept Android's
+      pairing prompt if one appears — it can take up to ~45 seconds.
+    </p>
+    <div class="row">
+      <button id="connect-btn" class="primary">Connect</button>
+      <button id="disconnect-btn" disabled>Disconnect</button>
+      <button id="forget-btn">Forget saved pairing</button>
+    </div>
+    <div id="conn-error"></div>
+  </section>
+
+  <section>
+    <h2>2. Device</h2>
+    <dl id="device-dl"><dt>—</dt><dd>not connected</dd></dl>
+    <div class="row">
+      <button id="status-btn" class="needs-conn" disabled>Get status</button>
+    </div>
+  </section>
+
+  <section>
+    <h2>3. One card, by hand</h2>
+    <p class="hint">
+      Put ONE card in the hopper. Each step waits for the machine to confirm before it reports
+      success. The machine moves on Feed and Route — keep hands clear.
+    </p>
+    <div class="row">
+      <button id="lease-btn" class="needs-conn" disabled>Acquire lease</button>
+      <button id="batch-btn" class="needs-conn" disabled>Start batch</button>
+      <button id="feed-btn" class="needs-conn" disabled>Feed one card</button>
+    </div>
+    <div class="row" id="route-row"></div>
+    <div class="row">
+      <button id="stop-btn" class="needs-conn danger" disabled>Stop batch + release lease</button>
+    </div>
+    <div id="step-error"></div>
+  </section>
+
+  <section>
+    <h2>Log</h2>
+    <div class="row" style="margin: 0 0 0.5rem">
+      <button id="copy-btn">Copy log</button>
+      <button id="clear-btn">Clear</button>
+    </div>
+    <pre id="log"></pre>
+  </section>
+</main>
+
+<script src="/x1pro-ble.js"></script>
+<script>
+(function () {
+  'use strict';
+  const { X1ProConnection, cycleRef, forgetPairings } = window.X1ProBle;
+  const $ = (id) => document.getElementById(id);
+
+  const LEASE_TTL_MS = 15000;
+  const LEASE_RENEW_MS = 5000;
+
+  let conn = null;
+  let leaseTimer = null;
+  let lastStatus = null;
+  let cycle = null;   // { fedBefore, routedBefore, ref } for the card currently held
+
+  function log(msg) {
+    const line = new Date().toISOString().slice(11, 23) + '  ' + msg;
+    const pre = $('log');
+    pre.textContent += line + String.fromCharCode(10);
+    pre.scrollTop = pre.scrollHeight;
+    console.log('[ble]', msg);
+  }
+
+  function showError(where, err) {
+    $(where).innerHTML = '';
+    if (!err) return;
+    const d = document.createElement('div');
+    d.className = 'error-box';
+    d.textContent = err.message || String(err);
+    $(where).appendChild(d);
+    log('ERROR ' + (err.message || err));
+  }
+
+  function setConnected(on) {
+    const pill = $('conn-pill');
+    pill.textContent = on ? 'connected' : 'disconnected';
+    pill.className = 'pill ' + (on ? 'ok' : '');
+    $('connect-btn').disabled = on;
+    $('disconnect-btn').disabled = !on;
+    document.querySelectorAll('.needs-conn').forEach((b) => { b.disabled = !on; });
+    document.querySelectorAll('#route-row button').forEach((b) => { b.disabled = !on; });
+    if (!on) stopLeaseTimer();
+  }
+
+  function renderDevice(status) {
+    if (status) lastStatus = status;
+    const s = lastStatus || {};
+    const caps = (conn && conn.capabilities) || {};
+    const rows = [
+      ['device_id', conn && conn.info && conn.info.device_id],
+      ['firmware', caps.firmware],
+      ['binding', conn && conn.info && conn.info.binding],
+      ['cycle control', String(caps.cycleControl)],
+      ['route ids', JSON.stringify(caps.routeIds)],
+      ['machine_state', s.machine_state],
+      ['run_request', s.run_request],
+      ['batch_active', String(s.batch_active)],
+      ['card_path_known', String(s.card_path_known)],
+      ['card_path_blocked', String(s.card_path_blocked)],
+      ['servo_action', s.servo_action],
+      ['fault_code', s.fault_code],
+      ['counters', JSON.stringify(s.counters)],
+      ['lease', conn && conn.lease],
+    ];
+    const dl = $('device-dl');
+    dl.innerHTML = '';
+    for (const [k, v] of rows) {
+      const dt = document.createElement('dt'); dt.textContent = k;
+      const dd = document.createElement('dd'); dd.textContent = v == null ? '—' : v;
+      dl.append(dt, dd);
+    }
+  }
+
+  function renderRouteButtons() {
+    const row = $('route-row');
+    row.innerHTML = '';
+    const ids = (conn && conn.capabilities && conn.capabilities.routeIds) || [];
+    // The vendor UI calls the two bins Left / Right; which id is which is unverified, so the
+    // button shows both the guess and the raw id until a real route settles it.
+    ids.forEach((id, i) => {
+      const b = document.createElement('button');
+      b.textContent = 'Route → ' + (i === 0 ? 'Left?' : 'Right?') + ' (id ' + id + ')';
+      b.addEventListener('click', () => step(() => route(id)));
+      row.appendChild(b);
+    });
+    if (!ids.length) {
+      const p = document.createElement('p');
+      p.className = 'hint';
+      p.textContent = 'No route ids reported — firmware may not support host cycle control.';
+      row.appendChild(p);
+    }
+  }
+
+  async function step(fn) {
+    showError('step-error', null);
+    try { await fn(); } catch (err) { showError('step-error', err); }
+    renderDevice();
+  }
+
+  async function cmd(name, args) {
+    const r = await conn.command(name, args);
+    log(name + ' (' + r._ms + 'ms) -> ' + JSON.stringify(r));
+    if (r.status) renderDevice(r.status);
+    if (r.accepted === false) throw new Error(name + ' REJECTED: ' + r.result);
+    return r;
+  }
+
+  function stopLeaseTimer() {
+    if (leaseTimer) { clearInterval(leaseTimer); leaseTimer = null; }
+  }
+
+  // ─── steps ───
+
+  async function acquireLease() {
+    await cmd('device.acquire_lease', { lease_ttl_ms: LEASE_TTL_MS });
+    if (!conn.lease) throw new Error('acquire_lease accepted but granted no lease id');
+    stopLeaseTimer();
+    // The lease is the device's dead-man switch: if renewals stop, it stops taking orders.
+    leaseTimer = setInterval(() => {
+      conn.command('device.renew_lease', { lease_ttl_ms: LEASE_TTL_MS })
+        .then((r) => { if (r.accepted === false) log('renew_lease REJECTED: ' + r.result); })
+        .catch((e) => log('renew_lease failed: ' + e.message));
+    }, LEASE_RENEW_MS);
+  }
+
+  async function startBatch() {
+    const s = (await cmd('device.get_status')).status;
+    if (s.machine_state !== 'READY' || s.run_request !== 'STOPPED') {
+      throw new Error('machine not READY/STOPPED (' + s.machine_state + '/' + s.run_request + ')');
+    }
+    await cmd('batch.start', { mode: 'continuous', target_count: 0, sound_enabled: false });
+    const ready = await conn.waitFor(
+      (st) => st.machine_state === 'PREPARE_WINDOW' && st.run_request === 'RUNNING' && st.batch_active === true,
+      4500, 'BATCH_START');
+    renderDevice(ready);
+    log('batch running, PREPARE_WINDOW');
+  }
+
+  async function feed() {
+    const s = (await cmd('device.get_status')).status;
+    if (s.machine_state !== 'PREPARE_WINDOW') throw new Error('not in PREPARE_WINDOW (' + s.machine_state + ')');
+    const ref = cycleRef(s);
+    cycle = { ref, fedBefore: s.counters.fed, routedBefore: s.counters.routed };
+    const args = { ...ref };
+    if (conn.capabilities.prefeed) args.prefeed_after = false;   // one card at a time while probing
+    await cmd('cycle.feed', args);
+    const after = await conn.waitFor((st) =>
+      (st.machine_state === 'WAIT_RESULT' && st.counters.fed === cycle.fedBefore + 1) ||
+      (st.machine_state === 'PAUSED_RECOVERABLE' && st.pause_reason === 'WAIT_NEXT_CARD'),
+      15000, 'FEED');
+    renderDevice(after);
+    if (after.machine_state === 'PAUSED_RECOVERABLE') { cycle = null; log('hopper EMPTY — nothing fed'); return; }
+    log('card FED and held — WAIT_RESULT. This is where the camera would photograph it.');
+  }
+
+  async function route(routeId) {
+    if (!cycle) throw new Error('no card held — Feed first');
+    const s = (await cmd('device.get_status')).status;
+    if (s.machine_state !== 'WAIT_RESULT') throw new Error('not in WAIT_RESULT (' + s.machine_state + ')');
+    await cmd('cycle.route', { ...cycle.ref, route_id: routeId });
+    const c = cycle;
+    const after = await conn.waitFor((st) =>
+      st.counters.routed === c.routedBefore + 1 && st.servo_action !== 'ROUTE' &&
+      ['PREPARE_WINDOW', 'PAUSED_RECOVERABLE', 'READY'].includes(st.machine_state),
+      8000, 'ROUTE');
+    renderDevice(after);
+    cycle = null;
+    log('ROUTED to id ' + routeId + ' — confirmed by counters.routed ' + c.routedBefore + ' -> ' + after.counters.routed +
+      '. Which bin did it land in?');
+  }
+
+  async function stopAll() {
+    try { await cmd('batch.stop', {}); } catch (e) { log('batch.stop: ' + e.message); }
+    stopLeaseTimer();
+    if (conn.lease) {
+      try { await cmd('device.release_lease', {}); } catch (e) { log('release_lease: ' + e.message); }
+      conn.lease = null;
+    }
+    cycle = null;
+  }
+
+  // ─── wiring ───
+
+  $('connect-btn').addEventListener('click', async () => {
+    showError('conn-error', null);
+    conn = new X1ProConnection({ onLog: log, onDisconnect: () => setConnected(false) });
+    try {
+      const status = await conn.connect();
+      log('get_status -> ' + JSON.stringify(status));
+      setConnected(true);
+      renderDevice(status.status);
+      renderRouteButtons();
+    } catch (err) {
+      showError('conn-error', err);
+      conn.disconnect();
+      setConnected(false);
+    }
+  });
+  $('disconnect-btn').addEventListener('click', () => { stopLeaseTimer(); conn && conn.disconnect(); });
+  $('forget-btn').addEventListener('click', () => { forgetPairings(); log('saved pairings forgotten'); });
+  $('status-btn').addEventListener('click', () => step(() => cmd('device.get_status')));
+  $('lease-btn').addEventListener('click', () => step(acquireLease));
+  $('batch-btn').addEventListener('click', () => step(startBatch));
+  $('feed-btn').addEventListener('click', () => step(feed));
+  $('stop-btn').addEventListener('click', () => step(stopAll));
+  $('copy-btn').addEventListener('click', () => {
+    navigator.clipboard.writeText($('log').textContent).then(() => log('log copied'), (e) => log('copy failed: ' + e.message));
+  });
+  $('clear-btn').addEventListener('click', () => { $('log').textContent = ''; });
+
+  if (!X1ProConnection.supported()) {
+    showError('conn-error', new Error('Web Bluetooth unavailable here — open this page in Chrome on Android over HTTPS (the Railway URL).'));
+    $('connect-btn').disabled = true;
+  }
+  setConnected(false);
+  $('connect-btn').disabled = !X1ProConnection.supported();
+})();
+</script>
+</body>
+</html>
