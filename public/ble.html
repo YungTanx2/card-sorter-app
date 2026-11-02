@@ -135,7 +135,7 @@
 <script>
 (function () {
   'use strict';
-  const { X1ProConnection, cycleRef, forgetPairings } = window.X1ProBle;
+  const { X1ProConnection, LEASED_COMMANDS, cycleRef, forgetPairings } = window.X1ProBle;
   const $ = (id) => document.getElementById(id);
 
   const LEASE_TTL_MS = 15000;
@@ -231,7 +231,7 @@
   }
 
   async function cmd(name, args) {
-    const r = await conn.command(name, args);
+    const r = await conn.command(name, args, LEASED_COMMANDS.includes(name) ? conn.lease : null);
     log(name + ' (' + r._ms + 'ms) -> ' + JSON.stringify(r));
     if (r.status) renderDevice(r.status);
     if (r.accepted === false) throw new Error(name + ' REJECTED: ' + r.result);
@@ -250,17 +250,26 @@
     stopLeaseTimer();
     // The lease is the device's dead-man switch: if renewals stop, it stops taking orders.
     leaseTimer = setInterval(() => {
-      conn.command('device.renew_lease', { lease_ttl_ms: LEASE_TTL_MS })
+      conn.command('device.renew_lease', { lease_ttl_ms: LEASE_TTL_MS }, conn.lease)
         .then((r) => { if (r.accepted === false) log('renew_lease REJECTED: ' + r.result); })
         .catch((e) => log('renew_lease failed: ' + e.message));
     }, LEASE_RENEW_MS);
   }
 
   async function startBatch() {
-    const s = (await cmd('device.get_status')).status;
-    if (s.machine_state !== 'READY' || s.run_request !== 'STOPPED') {
-      throw new Error('machine not READY/STOPPED (' + s.machine_state + '/' + s.run_request + ')');
+    if (!conn.lease) throw new Error('Acquire lease first');
+    // A fresh connection reports IDLE_UNSYNCED (scanner_link DOWN). The vendor waits up to 4.5s
+    // for READY before starting rather than requiring it immediately; if it never arrives, try
+    // anyway and let the device's own answer say why — that reply is what this probe is for.
+    let s;
+    try {
+      s = await conn.waitFor((st) => st.machine_state === 'READY' && st.run_request === 'STOPPED', 5000, 'READY');
+      log('machine READY');
+    } catch (e) {
+      s = (await cmd('device.get_status')).status;
+      log('never reached READY (' + s.machine_state + ', scanner_link ' + s.scanner_link + ') — trying batch.start anyway');
     }
+    renderDevice(s);
     await cmd('batch.start', { mode: 'continuous', target_count: 0, sound_enabled: false });
     const ready = await conn.waitFor(
       (st) => st.machine_state === 'PREPARE_WINDOW' && st.run_request === 'RUNNING' && st.batch_active === true,
