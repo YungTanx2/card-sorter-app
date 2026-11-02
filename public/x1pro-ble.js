@@ -217,6 +217,8 @@ window.X1ProBle = (function () {
       this.frameId = 0;
       this.frameVersion = 1;
       this.packetSize = DEFAULT_PACKET;
+      this.lastResponsePacketSize = DEFAULT_PACKET;   // largest packet the device sent last reply
+      this._responseMax = 0;
       this.lease = null;
       this.pending = null;
       this.queue = Promise.resolve();
@@ -247,6 +249,25 @@ window.X1ProBle = (function () {
       });
       this.onLog('selected ' + (this.device.name || this.device.id));
 
+      // Two attempts, like the vendor: the first tries to promote the packet size after auth;
+      // if the device chokes on larger packets, reconnect and stay at the 20-byte minimum.
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          return await this._open(attempt === 0);
+        } catch (err) {
+          if (err.message !== 'FAST_PACKET_PROBE_FAILED' || attempt !== 0) throw err;
+          this.onLog('larger packets failed — reconnecting at ' + DEFAULT_PACKET + ' bytes');
+          this.disconnect();
+          await new Promise((r) => setTimeout(r, 500));
+        }
+      }
+      throw new Error('BLE_CONNECT_FAILED');
+    }
+
+    /** Everything after the picker. Separate so a failed packet-size probe can reconnect to the
+     *  same device without showing the chooser again. */
+    async _open(tryFastPackets) {
+      this.packetSize = DEFAULT_PACKET;
       const gatt = await this.device.gatt.connect();
       const svc = await gatt.getPrimaryService(UUID.service);
       const [rx, tx, infoChar, keyChar] = await Promise.all(
@@ -279,7 +300,12 @@ window.X1ProBle = (function () {
         this.onLog(savePairing(this.info.device_id, readHex) ? 'pairing saved' : 'WARNING: could not persist pairing');
       }
 
-      tx.addEventListener('characteristicvaluechanged', (ev) => this._onPacket(ev.target.value));
+      // A reconnect (packet-size fallback) must not stack a second handler on the same
+      // characteristic — every packet would be fed to the reassembler twice and fail as INVALID.
+      if (this.txChar && this._txHandler) this.txChar.removeEventListener('characteristicvaluechanged', this._txHandler);
+      this.txChar = tx;
+      this._txHandler = (ev) => this._onPacket(ev.target.value);
+      tx.addEventListener('characteristicvaluechanged', this._txHandler);
       await tx.startNotifications();
 
       this.key = await deriveSessionKey(unhex(keyHex), this.nonce);
@@ -287,14 +313,39 @@ window.X1ProBle = (function () {
       this.frameId = 0;
       this.frameVersion = 1;
 
-      const status = await this.command('device.get_status');
+      let status = await this.command('device.get_status');
       // Firmware states which frame version it speaks only once authenticated.
       const fv = status.ble_frame_version ?? 1;
       if (fv === 1 || fv === 2) this.frameVersion = fv;
+
+      // Packet-size promotion. Web Bluetooth exposes no MTU, so the only evidence of what the
+      // link carries is the size of the packets the DEVICE just sent us. At 20 bytes every
+      // request is ~25 acknowledged writes, which is what made each command cost ~2s. Only
+      // attempted while the machine is idle, so a failure can't strand a card mid-cycle.
+      const st = status.status || {};
+      const idle = ['READY', 'IDLE_UNSYNCED'].includes(st.machine_state) && st.run_request === 'STOPPED' &&
+        st.batch_active === false && st.motor_requested === false;
+      const observed = Math.min(this.lastResponsePacketSize, 244);
+      if (tryFastPackets && idle && observed > this.packetSize) {
+        const before = status._ms;
+        this.packetSize = observed;
+        try {
+          status = await this.command('device.get_status', {}, null, 3000);
+        } catch (err) {
+          throw new Error('FAST_PACKET_PROBE_FAILED');
+        }
+        this.onLog('packet size ' + DEFAULT_PACKET + ' -> ' + observed + ' bytes (get_status ' + before + 'ms -> ' + status._ms + 'ms)');
+      } else {
+        this.onLog('packet size stays ' + this.packetSize + ' (device sent ' + this.lastResponsePacketSize +
+          '-byte packets' + (idle ? '' : ', machine not idle') + ')');
+      }
+
       this.capabilities = {
         cycleControl: status.cycle_control_supported === true,
         routeIds: Array.isArray(status.cycle_route_ids) ? status.cycle_route_ids.slice() : [],
-        prefeed: status.prefeed_supported === true,
+        // Lives under status, not on the reply itself — the first probe read the wrong place.
+        prefeed: (status.status || {}).prefeed_supported === true,
+        packetSize: this.packetSize,
         hostResultPolicy: status.host_result_policy_supported === true,
         extensibilityVersion: status.extensibility_version === 1 ? 1 : 0,
         firmware: status.firmware_version || null,
@@ -309,6 +360,7 @@ window.X1ProBle = (function () {
 
     _onPacket(view) {
       const pkt = new Uint8Array(view.buffer.slice(view.byteOffset, view.byteOffset + view.byteLength));
+      if (pkt.length > this._responseMax) this._responseMax = pkt.length;
       const r = this.reasm.accept(pkt);
       if (r.status === 'INVALID') {
         this.onLog('dropped invalid packet ' + hex(pkt.subarray(0, 12)));
@@ -319,19 +371,27 @@ window.X1ProBle = (function () {
       }
     }
 
-    async _transfer(payload) {
+    async _transfer(payload, timeoutMs) {
       this.frameId = this.frameId >= 65535 ? 1 : this.frameId + 1;
       const packets = encodeFrames(payload, this.frameId, this.packetSize, this.frameVersion);
       this.reasm.reset();
+      this._responseMax = 0;
       const reply = new Promise((resolve, reject) => {
-        const t = setTimeout(() => { this.pending = null; reject(new Error('BLE_RESPONSE_TIMEOUT')); }, REPLY_TIMEOUT_MS);
+        const t = setTimeout(() => { this.pending = null; reject(new Error('BLE_RESPONSE_TIMEOUT')); }, timeoutMs || REPLY_TIMEOUT_MS);
         this.pending = {
           resolve: (b) => { clearTimeout(t); resolve(b); },
           reject: (e) => { clearTimeout(t); reject(e); },
         };
       });
-      for (const p of packets) await this.rxChar.writeValueWithResponse(p);
-      return reply;
+      // A failed write must not leave the reply promise dangling with its timer running.
+      try {
+        for (const p of packets) await this.rxChar.writeValueWithResponse(p);
+      } catch (err) {
+        if (this.pending) { this.pending.reject(new Error('BLE_WRITE_FAILED')); this.pending = null; }
+      }
+      const bytes = await reply;
+      this.lastResponsePacketSize = this._responseMax || DEFAULT_PACKET;
+      return bytes;
     }
 
     /**
@@ -344,7 +404,7 @@ window.X1ProBle = (function () {
      * INVALID_COMMAND to a get_status that carries one. The vendor attaches it only to
      * renew_lease, batch.start, cycle.feed and cycle.route — see LEASED_COMMANDS.
      */
-    command(name, args, leaseId) {
+    command(name, args, leaseId, timeoutMs) {
       const run = async () => {
         if (!this.key) throw new Error('NOT_AUTHENTICATED');
         const seq = this.seq + 1n;
@@ -360,7 +420,7 @@ window.X1ProBle = (function () {
         const frame = await seal(this.key, this.nonce, seq, plain);
         this.seq = seq;
         const t0 = performance.now();
-        const replyBytes = await this._transfer(frame);
+        const replyBytes = await this._transfer(frame, timeoutMs);
         const reply = parseReply(dec.decode(await open(this.key, this.nonce, seq, replyBytes)));
         reply._ms = Math.round(performance.now() - t0);
         if (reply.kind === 'error') throw new Error(name + ': ' + (reply.error || 'DEVICE_ERROR'));

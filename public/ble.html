@@ -297,7 +297,9 @@
     const ref = cycleRef(s);
     cycle = { ref, fedBefore: s.counters.fed, routedBefore: s.counters.routed };
     const args = { ...ref };
-    if (conn.capabilities.prefeed) args.prefeed_after = false;   // one card at a time while probing
+    // Prefeed stages the NEXT card while this one waits for its route. Verified on the rig to stay
+    // at the hopper, out of the camera's view, so it is pure cycle-time saving — ask for it.
+    if (conn.capabilities.prefeed) args.prefeed_after = true;
     await cmd('cycle.feed', args);
     const after = await conn.waitFor((st) =>
       (st.machine_state === 'WAIT_RESULT' && st.counters.fed === cycle.fedBefore + 1) ||
