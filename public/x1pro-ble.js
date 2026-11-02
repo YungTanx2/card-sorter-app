@@ -320,6 +320,10 @@ window.X1ProBle = (function () {
      * request at a time, and a lease renewal racing a route would interleave their packets.
      * Resolves with the parsed reply; throws on kind:"error" or a malformed ack. An ack with
      * accepted:false is RETURNED, not thrown — "the device refused" is information.
+     *
+     * leaseId is opt-in per call, never defaulted to the held lease: firmware 0.3.25 answers
+     * INVALID_COMMAND to a get_status that carries one. The vendor attaches it only to
+     * renew_lease, batch.start, cycle.feed and cycle.route — see LEASED_COMMANDS.
      */
     command(name, args, leaseId) {
       const run = async () => {
@@ -329,7 +333,7 @@ window.X1ProBle = (function () {
         const msg = {
           v: 1, kind: 'command', id, device_id: this.info.device_id,
           client_id: this.info.session_nonce.slice(0, 16), client_seq: Number(seq),
-          name, lease_id: leaseId === undefined ? this.lease : leaseId, args: args || {},
+          name, lease_id: leaseId || null, args: args || {},
         };
         const plain = enc.encode(JSON.stringify(msg));
         if (plain.length > 1024) throw new Error('COMMAND_TOO_LARGE');
@@ -339,7 +343,7 @@ window.X1ProBle = (function () {
         const replyBytes = await this._transfer(frame);
         const reply = parseReply(dec.decode(await open(this.key, this.nonce, seq, replyBytes)));
         reply._ms = Math.round(performance.now() - t0);
-        if (reply.kind === 'error') throw new Error(reply.error || 'DEVICE_ERROR');
+        if (reply.kind === 'error') throw new Error(name + ': ' + (reply.error || 'DEVICE_ERROR'));
         if (reply.kind === 'ack' && (reply.ref !== id || reply.client_seq !== Number(seq) || reply.device_id !== this.info.device_id)) {
           throw new Error('INVALID_ACK');
         }
@@ -366,12 +370,16 @@ window.X1ProBle = (function () {
     }
   }
 
+  /** Commands that must carry the held lease id. Everything else sends lease_id: null. */
+  const LEASED_COMMANDS = Object.freeze(['device.renew_lease', 'device.release_lease',
+    'batch.start', 'cycle.feed', 'cycle.route']);
+
   /** The three uint64 identity fields every cycle command must echo from the latest status. */
   function cycleRef(status) {
     return { boot_id: status.boot_id, batch_seq: status.batch_seq, cycle_seq: status.cycle_seq };
   }
 
-  return { X1ProConnection, UUID, cycleRef, forgetPairings, loadPairing,
+  return { X1ProConnection, UUID, LEASED_COMMANDS, cycleRef, forgetPairings, loadPairing,
     // exported for tests
     _internal: { crc32, encodeFrames, Reassembler, seal, open, deriveSessionKey, parseReply, secureHeader } };
 })();
