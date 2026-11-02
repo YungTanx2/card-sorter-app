@@ -159,6 +159,25 @@ window.X1ProBle = (function () {
     return JSON.parse(text.replace(/("(?:boot_id|batch_seq|cycle_seq)"\s*:\s*)([0-9]+)(?=\s*[,}])/g, '$1"$2"'));
   }
 
+  /**
+   * A handful of commands are NOT sent as the JSON command envelope: the plaintext is a short raw
+   * tag, optionally followed by JSON args. Firmware answers INVALID_COMMAND if they arrive as
+   * JSON. Their replies are kind "machine_settings" / "motion_settings" / "optical_settings" /
+   * "pairing_hosts", never an ack. Returns null for the ordinary JSON-envelope commands.
+   */
+  function rawPlaintext(name, args) {
+    switch (name) {
+      case 'settings.get': return 'X1SG';
+      case 'settings.save': return 'X1SS' + JSON.stringify(args);
+      case 'motion.get': return 'X1MG';
+      case 'motion.save': return 'X1MS' + JSON.stringify(args);
+      case 'optical.get': return 'X1OG';
+      case 'optical.save': return 'X1OS' + JSON.stringify(args);
+      case 'pairing.list': return 'X1PRO_PAIR_LIST';
+      default: return null;
+    }
+  }
+
   // ═══════════════════════ PAIRING STORE ═══════════════════════════
 
   function loadPairing(deviceId) {
@@ -335,7 +354,8 @@ window.X1ProBle = (function () {
           client_id: this.info.session_nonce.slice(0, 16), client_seq: Number(seq),
           name, lease_id: leaseId || null, args: args || {},
         };
-        const plain = enc.encode(JSON.stringify(msg));
+        const raw = rawPlaintext(name, args || {});
+        const plain = enc.encode(raw !== null ? raw : JSON.stringify(msg));
         if (plain.length > 1024) throw new Error('COMMAND_TOO_LARGE');
         const frame = await seal(this.key, this.nonce, seq, plain);
         this.seq = seq;
@@ -381,5 +401,5 @@ window.X1ProBle = (function () {
 
   return { X1ProConnection, UUID, LEASED_COMMANDS, cycleRef, forgetPairings, loadPairing,
     // exported for tests
-    _internal: { crc32, encodeFrames, Reassembler, seal, open, deriveSessionKey, parseReply, secureHeader } };
+    _internal: { crc32, encodeFrames, Reassembler, seal, open, deriveSessionKey, parseReply, secureHeader, rawPlaintext } };
 })();

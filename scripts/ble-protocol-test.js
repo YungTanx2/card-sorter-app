@@ -128,6 +128,13 @@ async function deviceOpenRequest(key, nonce, frame) {
   ok(parsed.status.boot_id === '18446744073709551615', 'boot_id kept exact as string');
   ok(parsed.status.cycle_seq === '9007199254740993', 'cycle_seq above 2^53 kept exact');
 
+  // Raw-tag commands: firmware 0.3.25 answers INVALID_COMMAND to these as JSON envelopes.
+  ok(M.rawPlaintext('settings.get', {}) === 'X1SG', 'settings.get is the raw tag X1SG');
+  ok(M.rawPlaintext('motion.get', {}) === 'X1MG', 'motion.get is the raw tag X1MG');
+  ok(M.rawPlaintext('motion.save', { a: 1 }) === 'X1MS{"a":1}', 'motion.save is tag + JSON args');
+  ok(M.rawPlaintext('batch.start', {}) === null && M.rawPlaintext('device.get_status', {}) === null,
+    'ordinary commands still use the JSON envelope');
+
   // Full stack: seal -> frame -> reassemble -> open.
   const r4 = new M.Reassembler();
   for (const p of M.encodeFrames(fromDevice, 9, 20, 2)) res = r4.accept(p);
