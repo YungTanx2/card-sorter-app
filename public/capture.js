@@ -213,13 +213,18 @@ window.CardSorterCapture = (function () {
      *                                            no capture, no tone, no card consumed
      * @param {boolean}         [opts.collectSamples] also encode the full uncropped frame, for
      *                                            offline crop-geometry A/B. Dry runs only.
+     * @param {boolean}         [opts.manualTrigger] camera only, no frame-diff loop: the caller
+     *                                            decides when a card is ready and calls
+     *                                            captureNow(). Used when the X1PRO is driven over
+     *                                            Bluetooth and reports "card held" itself.
      * @param {function}        [opts.onStateChange] (state) => void
      * @param {number}          [opts.maxUploadBytes]
      */
     constructor(opts) {
       this.video = opts.video;
       this.cropGuide = opts.cropGuide || null;
-      this.onCapture = opts.onCapture;
+      this.onCapture = opts.onCapture || (() => {});
+      this.manualTrigger = !!opts.manualTrigger;
       this.onHopperEmpty = opts.onHopperEmpty || (() => {});
       this.onStall = opts.onStall || (() => {});
       this.onNoCard = opts.onNoCard || (() => {});
@@ -310,7 +315,7 @@ window.CardSorterCapture = (function () {
       this.lastActivityAt = Date.now();
       this.prevGray = null;
       this._setState(S.ARMED);
-      this.loopTimer = setInterval(() => this._tick(), this.settings.captureIntervalMs);
+      if (!this.manualTrigger) this.loopTimer = setInterval(() => this._tick(), this.settings.captureIntervalMs);
     }
 
     stop() {
@@ -474,7 +479,18 @@ window.CardSorterCapture = (function () {
 
     async _triggerCapture(meta) {
       this._setState(S.SCANNING);
+      const { blob, info } = await this._encodeCapture(meta);
+      this.onCapture(blob, info);
+    }
 
+    /** Manual-trigger mode: photograph whatever is in the crop right now. Resolves with the same
+     *  { blob, info } a frame-diff capture would hand to onCapture. */
+    async captureNow(meta) {
+      this._setState(S.SCANNING);
+      return this._encodeCapture(meta || {});
+    }
+
+    async _encodeCapture(meta) {
       const { sx, sy, sw, sh } = cropRectPx(this.video.videoWidth, this.video.videoHeight, this.crop);
       const w = Math.min(sw, 640);
       const h = Math.round(w * (sh / sw));
@@ -497,7 +513,7 @@ window.CardSorterCapture = (function () {
         info.framing = this.framing();
         info.crop = this.crop;
       }
-      this.onCapture(blob, info);
+      return { blob, info };
     }
 
     /** The whole frame, downscaled only if huge. Capped harder than the scan upload because a
