@@ -202,6 +202,20 @@ window.X1ProBle = (function () {
 
   // ═══════════════════════ 3. CONNECTION + COMMANDS ═══════════════════════════
 
+  /** Runs one GATT step, and on failure names the step in the error. Chrome's own messages
+   *  ("GATT Error Unknown.") say nothing about WHERE a connect died, which is the one thing
+   *  needed to tell a stale link from a pairing problem. The error's name is kept, because the
+   *  retry in _open keys off NetworkError. */
+  async function step(label, fn) {
+    try {
+      return await fn();
+    } catch (err) {
+      const e = new Error((err && err.message ? err.message : String(err)) + ' [at ' + label + ']');
+      e.name = (err && err.name) || 'Error';
+      throw e;
+    }
+  }
+
   class X1ProConnection {
     /** @param {object} [opts] { onLog(msg), onDisconnect() } */
     constructor(opts) {
@@ -268,13 +282,30 @@ window.X1ProBle = (function () {
      *  same device without showing the chooser again. */
     async _open(tryFastPackets) {
       this.packetSize = DEFAULT_PACKET;
-      const gatt = await this.device.gatt.connect();
-      const svc = await gatt.getPrimaryService(UUID.service);
-      const [rx, tx, infoChar, keyChar] = await Promise.all(
-        [UUID.rx, UUID.tx, UUID.info, UUID.pairingKey].map((u) => svc.getCharacteristic(u)));
+      // Android's BLE stack regularly fails the first operations on a fresh link with an opaque
+      // NetworkError ("GATT Error Unknown.") — a half-open connection left by an earlier page,
+      // or the stack still settling. The vendor app handles exactly this: on a NetworkError
+      // during connect/discovery/info read it drops the stale link, waits 200ms, reconnects and
+      // tries once more. Anything else, or a second failure, is real and is thrown.
+      let svc, infoView;
+      for (let attempt = 0; ; attempt++) {
+        try {
+          const gatt = await step('CONNECT_GATT', () => (this.device.gatt.connected ? this.device.gatt : this.device.gatt.connect()));
+          svc = await step('DISCOVER_SERVICE', () => gatt.getPrimaryService(UUID.service));
+          const infoChar = await step('DISCOVER_INFO', () => svc.getCharacteristic(UUID.info));
+          infoView = await step('READ_INFO', () => infoChar.readValue());
+          break;
+        } catch (err) {
+          if (attempt > 0 || err.name !== 'NetworkError') throw err;
+          this.onLog('link not ready (' + err.message + ') — reconnecting once');
+          if (this.device.gatt.connected) this.device.gatt.disconnect();
+          await new Promise((r) => setTimeout(r, 200));
+        }
+      }
+      const [rx, tx, keyChar] = await step('DISCOVER_CHARACTERISTICS', () => Promise.all(
+        [UUID.rx, UUID.tx, UUID.pairingKey].map((u) => svc.getCharacteristic(u))));
       this.rxChar = rx;
 
-      const infoView = await infoChar.readValue();
       this.info = JSON.parse(dec.decode(infoView));
       this.onLog('info ' + JSON.stringify(this.info));
       if (this.info.profile !== PROFILE) throw new Error('WRONG_DEVICE_PROFILE: ' + this.info.profile);
@@ -288,7 +319,7 @@ window.X1ProBle = (function () {
       // but only trusts the stored copy after the first pairing — so do the same, and log if the
       // two ever disagree, since that would mean the key rotates.
       this.onLog('reading pairing key — confirm the Android pairing prompt if it appears (up to ~45s)');
-      const keyView = await keyChar.readValue();
+      const keyView = await step('READ_PAIRING_KEY', () => keyChar.readValue());
       if (keyView.byteLength !== 32) throw new Error('PAIRING_KEY_UNAVAILABLE: ' + keyView.byteLength + ' bytes');
       const readHex = hex(new Uint8Array(keyView.buffer, keyView.byteOffset, 32));
       const stored = loadPairing(this.info.device_id);
@@ -306,7 +337,7 @@ window.X1ProBle = (function () {
       this.txChar = tx;
       this._txHandler = (ev) => this._onPacket(ev.target.value);
       tx.addEventListener('characteristicvaluechanged', this._txHandler);
-      await tx.startNotifications();
+      await step('START_NOTIFICATIONS', () => tx.startNotifications());
 
       this.key = await deriveSessionKey(unhex(keyHex), this.nonce);
       this.seq = 0n;
