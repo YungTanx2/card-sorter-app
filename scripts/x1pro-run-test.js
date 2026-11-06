@@ -206,6 +206,26 @@ function runUntil(driver, event) {
     await d.stop();
   });
 
+  await test('last:true routes the completing card, then ends without feeding another', async () => {
+    const m = new FakeMachine(['needed', 'needed', 'extra']);
+    let held = 0;
+    const d = new X1ProRunDriver({
+      conn: m,
+      onCardHeld: async () => { held++; return { routeId: ROUTE.ACCEPT, last: held === 2 }; },
+    });
+    const finished = new Promise((resolve, reject) => {
+      d.onLastRouted = () => resolve('last');
+      d.onHopperEmpty = () => reject(new Error('should not reach the hopper'));
+      d.onPause = reject;
+    });
+    await d.start();
+    assert.strictEqual(await finished, 'last');
+    assert.strictEqual(m.s.counters.routed_pass, 2, 'the completing card was routed, not stranded');
+    assert.strictEqual(m.sent.filter((c) => c.name === 'cycle.feed').length, 2, 'no third feed');
+    assert.strictEqual(m.cards.length, 1, 'the third card never left the hopper');
+    await d.stop();
+  });
+
   console.log('all ' + passed + ' passed');
   process.exit(0);
 })().catch((err) => { console.error('FAIL', err); process.exit(1); });

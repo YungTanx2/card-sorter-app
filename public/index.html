@@ -446,8 +446,7 @@
   const { api, getCrop, renderCropGuide, ThumbPreview, CaptureRig, describeFraming, VIDEO_CONSTRAINTS,
     sampleGrayFromVideo, encodeGray, decodeBaseline, meanAbsDiff } = window.CardSorterCapture;
   const audio = window.CardSorterAudio;
-  const { X1ProConnection } = window.X1ProBle;
-  const { X1ProRunDriver, ROUTE } = window.X1ProRun;
+  const { X1ProRunDriver, ROUTE, connectControl } = window.X1ProRun;
 
   // ── tiny router ──────────────────────────────────────────────
   const views = ['setup', 'calibrate', 'run', 'search', 'settings', 'summary'];
@@ -476,7 +475,6 @@
   let currentBoxLabel = '—';
   let rig = null; // CaptureRig — owns the crop, the frame-diff loop and the capture encoding
   let lastCaptureMeta = null; // { drift, spanMs } from the confirmation gate, for the readout
-  let machine = null; // X1ProConnection when the X1PRO is connected over Bluetooth
   let driver = null;  // X1ProRunDriver for the current run — null means audio-cue mode
 
   const $ = (id) => document.getElementById(id);
@@ -682,42 +680,8 @@
     }
   });
 
-  // ── X1PRO over Bluetooth ──
-  // Connected here rather than inside Start Run: requestDevice() needs a fresh tap, and Start Run
-  // spends that tap's activation window pre-warming the set before the run view even opens.
-  function renderMachineState(text, ok) {
-    $('x1pro-state').textContent = text;
-    $('x1pro-state').className = 'machine-state' + (ok ? ' ok' : '');
-    $('x1pro-connect-btn').textContent = ok ? 'Disconnect X1PRO' : 'Connect X1PRO (Bluetooth)';
-  }
-
-  $('x1pro-connect-btn').addEventListener('click', async () => {
-    if (machine && machine.connected) { machine.disconnect(); return; }
-    const conn = new X1ProConnection({
-      onLog: (m) => console.log('[x1pro]', m),
-      onDisconnect: () => {
-        if (machine === conn) machine = null;
-        renderMachineState('disconnected — runs use audio cues', false);
-      },
-    });
-    $('x1pro-connect-btn').disabled = true;
-    renderMachineState('connecting… confirm the Android pairing prompt if it appears', false);
-    try {
-      await conn.connect();
-      if (!conn.capabilities.cycleControl) throw new Error('this firmware has no host cycle control');
-      machine = conn;
-      renderMachineState('connected · ' + conn.info.device_id + ' · fw ' + conn.capabilities.firmware, true);
-    } catch (err) {
-      conn.disconnect();
-      renderMachineState('not connected — ' + err.message, false);
-    } finally {
-      $('x1pro-connect-btn').disabled = false;
-    }
-  });
-  if (!X1ProConnection.supported()) {
-    $('x1pro-connect-btn').disabled = true;
-    renderMachineState('Bluetooth unavailable in this browser — runs use audio cues', false);
-  }
+  // ── X1PRO over Bluetooth ── (shared Connect button — see connectControl in x1pro-run.js)
+  const machineCtl = connectControl($('x1pro-connect-btn'), $('x1pro-state'));
 
   // ═══════════════════════ CALIBRATE ═══════════════════════════════
 
@@ -913,7 +877,7 @@
   };
 
   async function startRun() {
-    if (machine && machine.connected) return startMachineRun();
+    if (machineCtl.conn) return startMachineRun();
     $('phase-badge').textContent = 'Audio cues — not routing the machine directly';
     // Wait for the machine tones to finish decoding before arming, so card #1 gets the same
     // tone as every other card. Safe to await (it never depends on resume()), and free in
@@ -974,7 +938,7 @@
     updateCounters();
 
     driver = new X1ProRunDriver({
-      conn: machine,
+      conn: machineCtl.conn,
       onLog: (m) => console.log('[x1pro-run]', m),
       onState: (label) => setBanner('armed', label),
       onHopperEmpty: () => finishRun(true),
@@ -1050,7 +1014,7 @@
 
   $('retry-scan-btn').addEventListener('click', async () => {
     if (driver) {
-      if (machine) driver.conn = machine;   // picks up a reconnect made on the Setup tab
+      if (machineCtl.conn) driver.conn = machineCtl.conn;   // picks up a reconnect made on the Setup tab
       $('stall-banner').hidden = true;
       try { await api('/api/session/' + session.id + '/resume', { method: 'POST' }); } catch (e) { /* best effort */ }
       try { await driver.resume(); } catch (err) { driver.onPause(err); }
