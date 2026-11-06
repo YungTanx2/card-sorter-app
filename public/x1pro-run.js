@@ -19,7 +19,7 @@
 window.X1ProRun = (function () {
   'use strict';
 
-  const { LEASED_COMMANDS, cycleRef } = window.X1ProBle;
+  const { X1ProConnection, LEASED_COMMANDS, cycleRef } = window.X1ProBle;
 
   const LEASE_TTL_MS = 15000;
   const LEASE_RENEW_MS = 5000;
@@ -36,9 +36,13 @@ window.X1ProRun = (function () {
     /**
      * @param {object} opts
      * @param {X1ProConnection} opts.conn       authenticated connection (conn.connected === true)
-     * @param {function} opts.onCardHeld        async () => routeId. Called with the card held
-     *                                          under the camera. Throwing pauses the run.
+     * @param {function} opts.onCardHeld        async () => routeId | { routeId, last }. Called
+     *                                          with the card held under the camera. Throwing
+     *                                          pauses the run. last:true routes this card and
+     *                                          then ends the run instead of feeding another.
      * @param {function} [opts.onHopperEmpty]   () => void — feed found no card
+     * @param {function} [opts.onLastRouted]    () => void — a card returned with last:true has
+     *                                          been routed; no further card was fed
      * @param {function} [opts.onPause]         (err) => void — run paused; card may be held
      * @param {function} [opts.onState]         (label) => void — short human-readable progress
      * @param {function} [opts.onLog]           (msg) => void
@@ -47,6 +51,7 @@ window.X1ProRun = (function () {
       this.conn = opts.conn;
       this.onCardHeld = opts.onCardHeld;
       this.onHopperEmpty = opts.onHopperEmpty || (() => {});
+      this.onLastRouted = opts.onLastRouted || (() => {});
       this.onPause = opts.onPause || (() => {});
       this.onState = opts.onState || (() => {});
       this.log = opts.onLog || (() => {});
@@ -128,9 +133,13 @@ window.X1ProRun = (function () {
             if (!fed) { this.running = false; this.onHopperEmpty(); return; }
           }
           await wait(CAPTURE_DELAY_MS);
-          const routeId = await this.onCardHeld();
+          const answer = await this.onCardHeld();
           if (this.stopping) break;
-          await this._route(routeId);
+          const last = typeof answer === 'object' && answer !== null && answer.last === true;
+          await this._route(typeof answer === 'object' && answer !== null ? answer.routeId : answer);
+          // Route BEFORE ending: stopping first would leave the machine holding a card it was
+          // never told where to put.
+          if (last) { this.running = false; this.onLastRouted(); return; }
         }
       } catch (err) {
         this.running = false;
@@ -216,5 +225,53 @@ window.X1ProRun = (function () {
     }
   }
 
-  return { X1ProRunDriver, ROUTE };
+  /**
+   * The Connect/Disconnect button both run pages share. It lives outside Start Run because
+   * requestDevice() needs a fresh tap, and starting a run spends that tap on server work before
+   * the camera even opens. A connection belongs to one page load: navigating between the price
+   * sorter and Set Builder drops it, so each page connects for itself.
+   *
+   * @returns {{ conn: X1ProConnection|null }} live getter — null whenever not connected
+   */
+  function connectControl(button, stateEl, opts) {
+    opts = opts || {};
+    const idle = opts.idleText || 'not connected — runs use audio cues';
+    let machine = null;
+    function render(text, ok) {
+      stateEl.textContent = text;
+      stateEl.className = 'machine-state' + (ok ? ' ok' : '');
+      button.textContent = ok ? 'Disconnect X1PRO' : 'Connect X1PRO (Bluetooth)';
+    }
+    button.addEventListener('click', async () => {
+      if (machine && machine.connected) { machine.disconnect(); return; }
+      const conn = new X1ProConnection({
+        onLog: (m) => console.log('[x1pro]', m),
+        onDisconnect: () => {
+          if (machine === conn) machine = null;
+          render('disconnected — runs use audio cues', false);
+        },
+      });
+      button.disabled = true;
+      render('connecting… confirm the Android pairing prompt if it appears', false);
+      try {
+        await conn.connect();
+        if (!conn.capabilities.cycleControl) throw new Error('this firmware has no host cycle control');
+        machine = conn;
+        render('connected · ' + conn.info.device_id + ' · fw ' + conn.capabilities.firmware, true);
+      } catch (err) {
+        conn.disconnect();
+        render('not connected — ' + err.message, false);
+      } finally {
+        button.disabled = false;
+      }
+    });
+    render(idle, false);
+    if (!X1ProConnection.supported()) {
+      button.disabled = true;
+      render('Bluetooth unavailable in this browser — runs use audio cues', false);
+    }
+    return { get conn() { return machine && machine.connected ? machine : null; } };
+  }
+
+  return { X1ProRunDriver, ROUTE, connectControl };
 })();

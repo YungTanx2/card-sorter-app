@@ -120,6 +120,11 @@
   .rarity-preview.warn { border-color: var(--red); background: #3a1a1a; }
   .rarity-preview .rp-head { font-weight: 600; }
   .rarity-preview .rp-skip { color: var(--muted); margin-top: .35rem; }
+  .machine-row { display: flex; gap: 0.6rem; align-items: center; flex-wrap: wrap; }
+  .machine-row button { flex: none; }
+  .machine-state { font-size: 0.8rem; color: var(--muted); }
+  .machine-state.ok { color: var(--green); }
+
   .stall-banner { margin-top: 1rem; padding: 0.9rem; background: #3a1a1a; border: 1px solid var(--red); border-radius: 10px; }
   .done-banner { padding: 0.9rem; background: #14301f; border: 1px solid var(--green); border-radius: 10px; font-size: 0.9rem; line-height: 1.5; }
   .stall-banner p { font-size: 0.85rem; margin-bottom: 0.6rem; }
@@ -330,6 +335,13 @@
         can never answer &ldquo;would a different crop have matched?&rdquo;, because those pixels
         are gone. Roughly 20&nbsp;MB per 50 cards. Dry runs only.</p>
 
+      <label>Machine</label>
+      <div class="machine-row">
+        <button class="secondary" id="x1pro-connect-btn">Connect X1PRO (Bluetooth)</button>
+        <span class="machine-state" id="x1pro-state">not connected — runs use audio cues</span>
+      </div>
+      <p class="hint">Connected, the run drives the X1PRO directly: it feeds a card, the phone photographs it while the machine holds it, then sends <strong>needed</strong> cards to the accept bin and <strong>extras</strong> to the reject bin. Not connected, it falls back to motion detection and audio cues. Connect before Start run, on this page — a connection made on the price sorter doesn't carry over.</p>
+
       <div id="run-error"></div>
       <button class="primary" id="start-run-btn">Start run</button>
 
@@ -440,6 +452,8 @@
 
 <script src="/capture.js"></script>
 <script src="/audio.js"></script>
+<script src="/x1pro-ble.js"></script>
+<script src="/x1pro-run.js"></script>
 <script>
 (function () {
   'use strict';
@@ -447,6 +461,7 @@
   // Camera stack is shared with the price-sorter page (index.html) — see capture.js.
   const { api, ThumbPreview, CaptureRig } = window.CardSorterCapture;
   const audio = window.CardSorterAudio;
+  const { X1ProRunDriver, ROUTE, connectControl } = window.X1ProRun;
 
   const $ = (id) => document.getElementById(id);
   const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -463,6 +478,7 @@
   let goalSession = null;
   let rig = null;
   let lastCaptureMeta = null; // { drift, spanMs } from the confirmation gate, for the readout
+  let driver = null; // X1ProRunDriver for the current run — null means audio-cue mode
   let rarityCounts = null;    // rarity -> slot count for the selected sets, for the create preview
   let thumb = null;
   let counts = { total: 0, needed: 0, extra: 0 };
@@ -843,9 +859,9 @@
     $('last-card').hidden = true;
     $('run-setup').hidden = true;
     $('run-live').hidden = false;
-    $('run-phase-badge').textContent = dryRun
+    $('run-phase-badge').textContent = (dryRun
       ? 'DRY RUN — nothing is counted toward the goal'
-      : 'LIVE — scans commit to goal progress';
+      : 'LIVE — scans commit to goal progress') + (machineCtl.conn ? ' · X1PRO over Bluetooth' : '');
     updateCounters();
 
     // Same reason as the price sorter: decode the machine tones before arming so the first card
@@ -853,6 +869,7 @@
     await audio.whenReady();
 
     thumb = new ThumbPreview({ container: $('last-card'), img: $('last-card-thumb'), downloadLink: $('last-card-download') });
+    if (machineCtl.conn) { await startMachineRun(collectSamples); return; }
     rig = new CaptureRig({
       video: $('camera'),
       cropGuide: $('run-crop-guide'),
@@ -881,7 +898,63 @@
     setBanner('armed', 'ARMED');
   });
 
-  async function submitScan(blob, meta) {
+  /**
+   * Bluetooth mode — same split as the price sorter (see index.html): the machine says when a
+   * card is held and is told the bin directly, so neither the frame-diff trigger nor the tones
+   * run. Dry runs route too: a needed card goes to accept on what a live run WOULD have counted,
+   * the same promise the ka-ching makes in audio mode.
+   */
+  async function startMachineRun(collectSamples) {
+    rig = new CaptureRig({
+      video: $('camera'), cropGuide: $('run-crop-guide'), settings: appSettings,
+      manualTrigger: true, collectSamples,
+    });
+    try {
+      await rig.start();
+    } catch (err) {
+      setBanner('stalled', 'CAMERA ERROR');
+      $('stall-banner').hidden = false;
+      $('stall-banner').querySelector('p').textContent =
+        'Camera access failed: ' + err.message + '. getUserMedia needs a secure context — open this over HTTPS (Railway) or on localhost.';
+      return;
+    }
+
+    driver = new X1ProRunDriver({
+      conn: machineCtl.conn,
+      onLog: (m) => console.log('[x1pro-run]', m),
+      onState: (label) => setBanner('armed', label),
+      onHopperEmpty: () => finishRun('hopper-empty'),
+      onLastRouted: () => finishRun('complete'),
+      onCardHeld: async () => {
+        setBanner('scanning', 'SCANNING…');
+        const { blob, info } = await rig.captureNow();
+        lastCaptureMeta = null;   // no settle gate in this mode — the machine held the card still
+        thumb.show(blob);
+        const result = await postScan(blob, info);
+        $('stall-banner').hidden = true;
+        recordResult(result);
+        const needed = result.outcome === 'needed';
+        setBanner(result.outcome, needed ? 'NEEDED' : 'EXTRA');
+        // The set closed with this card: route it, THEN finish — never strand a held card.
+        return { routeId: needed ? ROUTE.ACCEPT : ROUTE.REJECT, last: !!result.goalComplete };
+      },
+      onPause: (err) => {
+        setBanner('stalled', 'PAUSED');
+        ToneEmitter.alert();
+        $('retry-scan-btn').textContent = 'Resume';
+        $('stall-banner').hidden = false;
+        $('stall-banner').querySelector('p').textContent =
+          'Paused: ' + err.message + '. If a card is held under the camera it stays there — Resume re-photographs it and carries on.';
+      },
+    });
+    try {
+      await driver.start();
+    } catch (err) {
+      driver.onPause(err);
+    }
+  }
+
+  async function postScan(blob, meta) {
     const form = new FormData();
     form.append('image', blob, 'capture.jpg');
     // Same request as the scan itself, so a frame can never be filed against the wrong card.
@@ -891,8 +964,12 @@
       form.append('frameH', String(meta.fullFrameH || 0));
       form.append('crop', JSON.stringify(meta.crop || null));
     }
+    return api('/api/goal-session/' + goalSession.id + '/scan', { method: 'POST', body: form });
+  }
+
+  async function submitScan(blob, meta) {
     try {
-      const result = await api('/api/goal-session/' + goalSession.id + '/scan', { method: 'POST', body: form });
+      const result = await postScan(blob, meta);
       $('stall-banner').hidden = true;
       await ToneEmitter.emit(result.outcome);
       recordResult(result);
@@ -931,6 +1008,13 @@
   }
 
   $('retry-scan-btn').addEventListener('click', async () => {
+    if (driver) {
+      if (machineCtl.conn) driver.conn = machineCtl.conn;   // picks up a reconnect
+      $('stall-banner').hidden = true;
+      try { await api('/api/goal-session/' + goalSession.id + '/resume', { method: 'POST' }); } catch (e) { /* best effort */ }
+      try { await driver.resume(); } catch (err) { driver.onPause(err); }
+      return;
+    }
     if (!rig) return;
     // No image was taken, so there is nothing to re-post — go back to watching this card settle.
     if (rig.stallReason === 'unsettled') {
@@ -1001,6 +1085,8 @@
     if (!rig || rig.isDone()) return;
     rig.markDone();
     rig.stop();
+    const viaMachine = !!driver;
+    if (driver) { const d = driver; driver = null; await d.stop(); }
     try { await api('/api/goal-session/' + goalSession.id + '/complete', { method: 'POST' }); } catch (e) { /* best effort */ }
 
     const done = reason === 'complete';
@@ -1011,7 +1097,9 @@
     $('done-heading').textContent = done ? 'Set complete' : 'Run complete';
     $('done-complete-note').hidden = !done;
     $('done-reason').textContent =
-      done ? '' : (reason === 'hopper-empty' ? 'Stopped: no cards seen for a while — hopper looks empty.' : '');
+      done ? '' : (reason === 'hopper-empty'
+        ? (viaMachine ? 'Stopped: the X1PRO found the hopper empty.' : 'Stopped: no cards seen for a while — hopper looks empty.')
+        : '');
     $('done-dry-badge').hidden = !goalSession.dryRun;
     $('done-total').textContent = counts.total;
     $('done-needed').textContent = counts.needed;
@@ -1306,6 +1394,9 @@
     await openPastSession(detail.session);
     $('lowconf-heading').scrollIntoView({ behavior: 'smooth', block: 'start' });
   }
+
+  // ── X1PRO over Bluetooth ── (shared Connect button — see connectControl in x1pro-run.js)
+  const machineCtl = connectControl($('x1pro-connect-btn'), $('x1pro-state'));
 
   (async function boot() {
     try {
