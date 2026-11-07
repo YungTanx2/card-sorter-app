@@ -3,6 +3,7 @@ import sharp from 'sharp';
 import { db } from './db';
 import { StallError } from './errors';
 import { matchCard, prewarmEmbeddings } from './embeddings';
+import { straightenCard } from './straighten';
 import { readCardTitle, fuseSignals, OcrTitleMatch } from './ocr';
 import { getSettings } from './settings';
 import { fetchSets, getCandidatesForSets, prewarmSet, fetchSetCandidates } from './tcgcsv';
@@ -568,7 +569,9 @@ export async function scanGoalCard(goalSessionId: string, imageBuffer: Buffer): 
     // two, so serialising them would add its full cost to every scan for no reason. Recognition
     // still sits far inside the 4.2s machine cycle.
     const [match, ocrResult] = await Promise.all([
-      matchCard(imageBuffer, candidates),
+      // OCR keeps the original capture: its own detectCard() finds the title band in it.
+      (settings.straightenEnabled ? straightenCard(imageBuffer).then((s) => s.image) : Promise.resolve(imageBuffer))
+        .then((buf) => matchCard(buf, candidates)),
       settings.ocrEnabled
         ? readCardTitle(imageBuffer, candidates, { minTitleChars: settings.ocrMinTitleChars })
         : Promise.resolve(null),

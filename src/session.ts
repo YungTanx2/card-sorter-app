@@ -3,6 +3,7 @@ import { db } from './db';
 import { StallError } from './errors';
 import { getProductCached } from './tcgtracking';
 import { matchCard, prewarmEmbeddings } from './embeddings';
+import { straightenCard } from './straighten';
 import { readCardTitle, fuseSignals, OcrTitleMatch } from './ocr';
 import { getSettings } from './settings';
 import { fetchSets, getCandidatesForSets, getPricesForProduct, prewarmSet } from './tcgcsv';
@@ -277,9 +278,12 @@ export async function scanCard(sessionId: string, imageBuffer: Buffer): Promise<
     // possible answer for this run, and leaving it in only manufactures ties (see tcgcsv.ts).
     // The same scoped list feeds OCR; see ocr.ts on why scoping is what makes a title read
     // sufficient rather than merely suggestive.
-    candidates = getCandidatesForSets(session.setIds, session.variant);
+    const scoped = getCandidatesForSets(session.setIds, session.variant);
+    candidates = scoped;
     const [match, ocrResult] = await Promise.all([
-      matchCard(imageBuffer, candidates),
+      // OCR keeps the original capture: its own detectCard() finds the title band in it.
+      (settings.straightenEnabled ? straightenCard(imageBuffer).then((s) => s.image) : Promise.resolve(imageBuffer))
+        .then((buf) => matchCard(buf, scoped)),
       settings.ocrEnabled
         ? readCardTitle(imageBuffer, candidates, { minTitleChars: settings.ocrMinTitleChars })
         : Promise.resolve(null),

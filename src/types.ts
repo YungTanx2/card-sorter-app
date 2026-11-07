@@ -348,6 +348,13 @@ export interface AppSettings {
    * it at all. 6 keeps every real card name while removing that whole failure class.
    */
   ocrMinTitleChars: number;
+  /**
+   * Rotate the card upright and crop to it before CLIP (src/straighten.ts). Off by default until a
+   * full-resolution dry run confirms the offline result, which was measured on 200px thumbnails
+   * (Hyper/sr run: confident 63% -> 82%, 230 of 232 checked right). OCR always reads the
+   * unstraightened capture; thumbnails keep it too, so the review strip still shows what was shot.
+   */
+  straightenEnabled: boolean;
   defaultThresholdCents: number;
   defaultCondition: string;
   captureIntervalMs: number;
