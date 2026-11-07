@@ -5,6 +5,7 @@
   "ocrEnabled": true,
   "ocrMinSim": 0.8,
   "ocrMinTitleChars": 6,
+  "straightenEnabled": false,
   "defaultThresholdCents": 50,
   "defaultCondition": "Near Mint",
   "captureIntervalMs": 200,

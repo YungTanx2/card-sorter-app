@@ -5,6 +5,7 @@ import { db } from './db';
 import { shutdownOcr } from './ocr';
 import { fetchCategories, fetchSets, fetchVariants, fetchRarities, getCandidatesForSets } from './tcgcsv';
 import { scoreCandidates } from './embeddings';
+import { straightenCard } from './straighten';
 import sharp from 'sharp';
 import { getSettings, updateSettings } from './settings';
 import { StallError } from './errors';
@@ -486,7 +487,7 @@ app.get('/api/capture-sample/:id/candidates', async (req, res) => {
     const cropped = await sharp(ctx.frame).extract(rect).resize({ width: w, height: h }).toBuffer();
 
     const candidates = getCandidatesForSets(ctx.goal.setIds, ctx.goal.variant);
-    const scored = await scoreCandidates(cropped, candidates);
+    const scored = await scoreCandidates(getSettings().straightenEnabled ? (await straightenCard(cropped)).image : cropped, candidates);
     const byId = new Map(candidates.map((c) => [c.productId, c]));
 
     res.json({
