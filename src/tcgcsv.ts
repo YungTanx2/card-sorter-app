@@ -219,12 +219,25 @@ function hasPrintingFor(row: CatalogRow, variant: string): boolean {
 }
 
 /**
+ * Puzzle-insert pieces and Ink Drop tokens: products sold in a set that are not cards. TCGCSV
+ * gives them no card number and the literal rarity "None"; in Hyperia City and Attack of the
+ * Vine! these 22 products are the only rows with either, so requiring both keeps a real card
+ * with one field missing in the pool. They can never be the right answer to a capture, but their
+ * busy, low-contrast art scores close to anything poorly lit, so they win low-confidence scans:
+ * on the first straightened Hyper/sr run, 2 of the 5 wrong top matches were a puzzle insert.
+ */
+function isNonCardProduct(row: CatalogRow): boolean {
+  return !row.number?.trim() && (!row.rarity || row.rarity === 'None');
+}
+
+/**
  * Reads back the pre-warmed candidate list for a session's scoped sets — this is what
  * session.ts's scanCard() matches a capture against, entirely from the local cache.
  *
  * `variant` narrows the pool to the printing being sorted. Passing it is strongly preferred:
  * the run already declared one, and matching against printings it cannot route is pure
- * ambiguity. It stays optional so offline tooling (scripts/recognition-ab.ts) can score against the
+ * ambiguity. The scoped pool also drops non-card products (isNonCardProduct); the unscoped one
+ * keeps them, because it resolves historical rows that may point at one. It stays optional so offline tooling (scripts/recognition-ab.ts) can score against the
  * unfiltered catalog when that is deliberately the question.
  */
 export function getCandidatesForSets(setIds: number[], variant?: string): CandidateCard[] {
@@ -233,7 +246,7 @@ export function getCandidatesForSets(setIds: number[], variant?: string): Candid
   const rows = db.prepare(`SELECT * FROM tcgcsv_cache WHERE set_id IN (${placeholders})`).all(...setIds) as CatalogRow[];
   if (!variant) return rows.map(rowToCandidate);
 
-  const scoped = rows.filter((r) => hasPrintingFor(r, variant));
+  const scoped = rows.filter((r) => hasPrintingFor(r, variant) && !isNonCardProduct(r));
 
   // Never let the filter empty the pool. A variant string that matches no subTypeName in this set
   // — a run created against a different game, or TCGCSV renaming a printing — would otherwise
