@@ -106,6 +106,17 @@
     position: absolute; border: 2px dashed var(--accent); border-radius: 8px;
     pointer-events: none; box-shadow: 0 0 0 9999px rgba(0,0,0,0.45);
   }
+  .crop-guide.suggested { border: 2px solid #22c55e; box-shadow: none; }
+  .card-box { position: absolute; border: 2px solid #eab308; pointer-events: none; }
+
+  .calib-wizard { margin-bottom: 1rem; padding: 0.85rem; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; }
+  .calib-wizard h2 { font-size: 0.95rem; margin-bottom: 0.4rem; }
+  .calib-wizard ol { margin: 0 0 0.6rem 1.2rem; font-size: 0.85rem; line-height: 1.5; }
+  .calib-wizard button { min-height: 48px; margin-top: 0; }
+  .calib-wizard pre { white-space: pre-wrap; word-break: break-word; margin-top: 0.6rem; }
+  .calib-wizard .warn { color: #fbbf24; font-size: 0.82rem; margin-top: 0.4rem; }
+  .legend { font-size: 0.75rem; color: var(--muted); margin-top: 0.35rem; }
+  .legend i { display: inline-block; width: 0.9rem; height: 0.6rem; margin: 0 0.25rem 0 0.6rem; vertical-align: middle; }
 
   input[type=range] { width: 100%; accent-color: var(--accent); }
   .slider-value { color: var(--text); font-weight: 600; }
@@ -254,9 +265,32 @@
   <!-- ══════════════════════ CALIBRATE ══════════════════════ -->
   <section id="view-calibrate" hidden>
     <p class="hint">Aligns the capture window to where the card sits in your fixed mount — a one-time setup per rig, not per run. Every capture is cropped to this box before it's sent for recognition.</p>
+    <div class="calib-wizard">
+      <h2>Recommend a setting</h2>
+      <ol>
+        <li>Clear the platform, then tap <strong>Capture empty</strong>.</li>
+        <li>Put a card where the machine drops it, then tap <strong>Recommend</strong>.</li>
+        <li>Check the green box, tap <strong>Apply</strong>, then <strong>Save crop</strong>.</li>
+      </ol>
+      <div class="row">
+        <button class="secondary" id="rec-empty-btn">1. Capture empty</button>
+        <button class="secondary" id="rec-card-btn" disabled>2. Recommend</button>
+      </div>
+      <pre id="rec-result" class="hint" hidden></pre>
+      <div id="rec-warnings"></div>
+      <button class="primary" id="rec-apply-btn" hidden>3. Apply suggestion</button>
+    </div>
+
     <div class="camera-wrap">
       <video id="calib-camera" playsinline autoplay muted></video>
       <div class="crop-guide" id="calib-crop-guide"></div>
+      <div class="crop-guide suggested" id="rec-crop-guide" hidden></div>
+      <div class="card-box" id="rec-card-box" hidden></div>
+    </div>
+    <div class="legend" id="rec-legend" hidden>
+      <i style="border:2px dashed var(--accent)"></i>current
+      <i style="border:2px solid #22c55e"></i>suggested
+      <i style="border:2px solid #eab308"></i>card found
     </div>
 
     <label for="crop-size-slider">Capture window size — <span class="slider-value" id="crop-size-value"></span></label>
@@ -472,7 +506,8 @@
   // preview) lives in capture.js, shared with the Set Builder page — see the comment at the top
   // of that file for why it isn't duplicated.
   const { api, getCrop, renderCropGuide, ThumbPreview, CaptureRig, describeFraming, VIDEO_CONSTRAINTS,
-    sampleGrayFromVideo, encodeGray, decodeBaseline, meanAbsDiff } = window.CardSorterCapture;
+    sampleGrayFromVideo, encodeGray, decodeBaseline, meanAbsDiff,
+    snapshotFrame, detectCardBox, recommendCrop } = window.CardSorterCapture;
   const audio = window.CardSorterAudio;
   const { X1ProRunDriver, ROUTE, connectControl } = window.X1ProRun;
 
@@ -792,7 +827,103 @@
 
   // ── empty-platform baseline ──────────────────────────────────────────────
   // Held locally until Save, so a mis-aimed capture can be redone without having written it.
-  let pendingBaseline = null;   // { baseline, crop } from this session's Capture press
+  // `snap` marks a baseline taken from the Recommend wizard's empty-platform snapshot: that one is
+  // re-sampled whenever the window moves, so it always describes the crop that gets saved.
+  let pendingBaseline = null;   // { baseline, crop, snap? } from this session's Capture press
+  let pendingPresenceMinDiff = null; // threshold suggested by Recommend, saved with the crop
+
+  // ── Recommend wizard ─────────────────────────────────────────────────────
+  let recEmpty = null;        // full-resolution snapshot of the empty platform
+  let recSuggestion = null;   // { zoom, vpos, crop, presenceMinDiff }
+
+  function resampleSnapBaseline() {
+    if (!recEmpty || !(pendingBaseline && pendingBaseline.snap)) return;
+    pendingBaseline = { baseline: encodeGray(sampleGrayFromVideo(recEmpty, calibCrop())), crop: calibCrop(), snap: true };
+  }
+
+  function clearSuggestion() {
+    recSuggestion = null;
+    $('rec-crop-guide').hidden = true;
+    $('rec-card-box').hidden = true;
+    $('rec-legend').hidden = true;
+    $('rec-apply-btn').hidden = true;
+    $('rec-warnings').innerHTML = '';
+  }
+
+  $('rec-empty-btn').addEventListener('click', () => {
+    const v = $('calib-camera');
+    if (!v.videoWidth) { $('calib-status').textContent = 'Start the camera first.'; return; }
+    recEmpty = snapshotFrame(v);
+    pendingBaseline = { baseline: null, crop: null, snap: true };
+    resampleSnapBaseline();
+    clearSuggestion();
+    $('rec-card-btn').disabled = false;
+    $('rec-result').hidden = false;
+    $('rec-result').textContent = 'Empty platform captured. Now put a card on the platform and tap Recommend.';
+    renderPresence();
+  });
+
+  $('rec-card-btn').addEventListener('click', () => {
+    const v = $('calib-camera');
+    if (!v.videoWidth || !recEmpty) return;
+    clearSuggestion();
+    const cardFrame = snapshotFrame(v);
+    const box = detectCardBox(recEmpty, cardFrame);
+    if (!box || box.areaFrac < 0.03) {
+      $('rec-result').textContent = "Couldn't find the card. Check it's fully on the platform and well lit, and that "
+        + 'nothing else moved since Capture empty (including the phone).';
+      return;
+    }
+    if (box.areaFrac > 0.85) {
+      $('rec-result').textContent = 'Almost the whole picture changed, which usually means the phone moved or the '
+        + 'lighting changed. Capture empty again, then Recommend.';
+      return;
+    }
+    const rec = recommendCrop(box);
+    // Presence threshold from how different this card looks from the empty platform inside the
+    // suggested window: 40% of that gap, never below the default of 10.
+    const emptyGray = sampleGrayFromVideo(recEmpty, rec.crop);
+    const cardGray = sampleGrayFromVideo(cardFrame, rec.crop);
+    const cardDiff = meanAbsDiff(cardGray, emptyGray);
+    const presenceMinDiff = Math.max(10, Math.round(cardDiff * 0.4));
+    recSuggestion = { zoom: rec.zoom, vpos: rec.vpos, crop: rec.crop, presenceMinDiff };
+
+    renderCropGuide($('rec-crop-guide'), rec.crop);
+    renderCropGuide($('rec-card-box'), box);
+    $('rec-crop-guide').hidden = false;
+    $('rec-card-box').hidden = false;
+    $('rec-legend').hidden = false;
+    $('rec-apply-btn').hidden = false;
+
+    const f = describeFraming(v.videoWidth, v.videoHeight, { captureCropZoomPct: rec.zoom, captureCropVPosPct: rec.vpos });
+    $('rec-result').textContent = [
+      'window size     ' + $('crop-size-slider').value + '%  ->  ' + rec.zoom + '%',
+      'height          ' + $('crop-vpos-slider').value + '%  ->  ' + rec.vpos + '%',
+      'card threshold  ' + (appSettings.cardPresenceMinDiff ?? 10) + '  ->  ' + presenceMinDiff + '   (card vs empty: ' + cardDiff.toFixed(1) + ')',
+      f ? 'detail          ' + f.ratio + 'x model input' + (f.starved ? '  (low, want 1.5x or more)' : '') : '',
+    ].filter(Boolean).join(String.fromCharCode(10));
+    const warnings = rec.warnings.slice();
+    if (cardDiff < 15) warnings.push('The card barely stands out from the platform here, so card detection may miss cards. Brighter or more even lighting would help.');
+    $('rec-warnings').innerHTML = warnings.map((w) => `<div class="warn">⚠ ${w}</div>`).join('');
+  });
+
+  $('rec-apply-btn').addEventListener('click', () => {
+    if (!recSuggestion) return;
+    $('crop-size-slider').value = recSuggestion.zoom;
+    $('crop-vpos-slider').value = recSuggestion.vpos;
+    pendingPresenceMinDiff = recSuggestion.presenceMinDiff;
+    if (!pendingBaseline || pendingBaseline.snap) {
+      pendingBaseline = { baseline: null, crop: null, snap: true };
+      resampleSnapBaseline();
+    }
+    updateCalibPreview();
+    renderFraming();
+    renderPresence();
+    $('rec-crop-guide').hidden = true;
+    $('rec-legend').hidden = true;
+    $('rec-apply-btn').hidden = true;
+    $('calib-status').textContent = 'Suggestion applied. Tap Save crop to keep it.';
+  });
   let calibPresenceTimer = null;
 
   function calibCrop() {
@@ -813,11 +944,11 @@
     const v = $('calib-camera');
     if (!v.videoWidth) { $('calib-presence').textContent = 'Start the camera to measure.'; return; }
     const base = activeBaseline();
-    const threshold = appSettings.cardPresenceMinDiff ?? 10;
+    const threshold = pendingPresenceMinDiff ?? appSettings.cardPresenceMinDiff ?? 10;
     if (!base) {
       $('calib-presence').textContent = [
         'baseline   none for this crop - presence check is OFF',
-        'threshold  ' + threshold,
+        'threshold  ' + threshold + (pendingPresenceMinDiff != null ? ' (suggested, unsaved)' : ''),
         '',
         'Clear the platform and press Capture empty platform.',
       ].join(String.fromCharCode(10));
@@ -827,7 +958,7 @@
     const diff = meanAbsDiff(gray, base);
     $('calib-presence').textContent = [
       'baseline   stored' + (pendingBaseline ? ' (unsaved - press Save crop)' : ''),
-      'threshold  ' + threshold,
+      'threshold  ' + threshold + (pendingPresenceMinDiff != null ? ' (suggested, unsaved)' : ''),
       'now        ' + diff.toFixed(2),
       'verdict    ' + (diff <= threshold ? 'NO CARD - a capture here would be suppressed'
         : 'card present - would capture'),
@@ -847,6 +978,7 @@
     if (!v.videoWidth) { $('calib-status').textContent = 'Start the camera first.'; return; }
     const gray = sampleGrayFromVideo(v, calibCrop());
     pendingBaseline = { baseline: encodeGray(gray), crop: calibCrop() };
+    clearSuggestion();
     $('calib-status').textContent = 'Empty platform captured — press Save crop to keep it.';
     renderPresence();
   });
@@ -857,8 +989,8 @@
     renderPresence();
   });
 
-  $('crop-size-slider').addEventListener('input', () => { updateCalibPreview(); renderFraming(); renderPresence(); });
-  $('crop-vpos-slider').addEventListener('input', () => { updateCalibPreview(); renderFraming(); renderPresence(); });
+  $('crop-size-slider').addEventListener('input', () => { updateCalibPreview(); resampleSnapBaseline(); renderFraming(); renderPresence(); });
+  $('crop-vpos-slider').addEventListener('input', () => { updateCalibPreview(); resampleSnapBaseline(); renderFraming(); renderPresence(); });
   $('calib-stop-btn').addEventListener('click', () => { stopCalibCamera(); stopPresenceLoop(); });
 
   $('calib-save-btn').addEventListener('click', async () => {
@@ -872,9 +1004,11 @@
       patch.emptyPlatformBaseline = pendingBaseline.baseline;
       patch.emptyPlatformCrop = pendingBaseline.crop;
     }
+    if (pendingPresenceMinDiff != null) patch.cardPresenceMinDiff = pendingPresenceMinDiff;
     try {
       applySettings(await api('/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch) }));
       pendingBaseline = null;
+      pendingPresenceMinDiff = null;
       $('calib-status').textContent = 'Saved — every capture will use this crop from now on.'
         + (appSettings.emptyPlatformBaseline ? ' Presence check is on.' : ' Presence check is off (no baseline).');
       renderPresence();
@@ -887,6 +1021,11 @@
     $('crop-size-slider').value = appSettings.captureCropZoomPct;
     $('crop-vpos-slider').value = appSettings.captureCropVPosPct;
     pendingBaseline = null;
+    pendingPresenceMinDiff = null;
+    recEmpty = null;
+    clearSuggestion();
+    $('rec-card-btn').disabled = true;
+    $('rec-result').hidden = true;
     updateCalibPreview();
     startCalibCamera();
     startPresenceLoop();
