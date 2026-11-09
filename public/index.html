@@ -143,6 +143,33 @@
   ul.results li .tag.bulk { background: rgba(239,68,68,0.2); color: var(--red); }
 
   details summary { cursor: pointer; color: var(--muted); font-size: 0.85rem; margin-top: 1rem; }
+
+  /* Settings form */
+  .settings-group { margin-top: 1.25rem; }
+  .settings-group h2 { font-size: 0.95rem; margin-bottom: 0.25rem; }
+  .settings-field { padding: 0.55rem 0; border-bottom: 1px solid var(--border); }
+  .settings-field label { margin: 0 0 0.3rem; color: var(--text); font-size: 0.9rem; }
+  .settings-field .help { font-size: 0.75rem; color: var(--muted); margin-top: 0.25rem; }
+  .settings-field.dirty label::after { content: ' •'; color: var(--accent); }
+  .settings-field.invalid input, .settings-field.invalid textarea { border-color: var(--red); }
+  .settings-field input, .settings-field select { min-height: 44px; font-size: 1rem; }
+  .settings-field textarea { min-height: 10rem; }
+  .toggle-row { display: flex; align-items: center; justify-content: space-between; gap: 1rem; min-height: 44px; }
+  .toggle-row label { margin: 0; }
+  .switch { position: relative; width: 52px; height: 30px; flex: none; }
+  .switch input { opacity: 0; width: 100%; height: 100%; position: absolute; inset: 0; margin: 0; cursor: pointer; min-height: 0; }
+  .switch span { position: absolute; inset: 0; border-radius: 999px; background: var(--surface2); border: 1px solid var(--border); pointer-events: none; transition: background .15s; }
+  .switch span::after { content: ''; position: absolute; top: 3px; left: 3px; width: 22px; height: 22px; border-radius: 50%; background: var(--muted); transition: transform .15s, background .15s; }
+  .switch input:checked + span { background: var(--accent); border-color: var(--accent); }
+  .switch input:checked + span::after { transform: translateX(22px); background: white; }
+  .range-row { display: flex; align-items: center; gap: 0.75rem; }
+  .range-row input[type=range] { flex: 1; min-height: 44px; }
+  .range-row output { min-width: 3.5rem; text-align: right; font-weight: 600; }
+  .unit-row { display: flex; align-items: center; gap: 0.5rem; }
+  .unit-row input { flex: 1; }
+  .unit-row .unit { color: var(--muted); font-size: 0.85rem; min-width: 1.5rem; }
+  .settings-bar { position: sticky; bottom: 0; background: var(--bg); padding: 0.75rem 0 calc(0.75rem + env(safe-area-inset-bottom)); margin-top: 1rem; border-top: 1px solid var(--border); }
+  .settings-bar button { min-height: 48px; }
   .csv-links { display: flex; gap: 0.6rem; margin-top: 1rem; }
   .csv-links a { flex: 1; text-align: center; background: var(--surface2); border: 1px solid var(--border); color: var(--text); border-radius: 8px; padding: 0.7rem; text-decoration: none; font-size: 0.85rem; }
 </style>
@@ -158,7 +185,7 @@
     <button data-view="search">Search</button>
     <button data-view="settings">Settings</button>
     <a class="nav-link" href="/runs.html">Runs</a>
-    <a class="nav-link" href="/sets.html">Set Builder →</a>
+    <a class="nav-link" href="/sets.html" id="set-builder-link">Set Builder →</a>
   </nav>
 </header>
 
@@ -342,13 +369,14 @@
 
   <!-- ══════════════════════ SETTINGS ══════════════════════ -->
   <section id="view-settings" hidden>
-    <p class="hint">Raw settings JSON — includes the CSV column mapping (Decision #8). A nicer editor is Phase 3; for now edit the JSON directly.</p>
-    <textarea id="settings-json"></textarea>
-    <div class="row" style="margin-top:0.75rem;">
-      <button class="secondary" id="settings-reload-btn">Reload</button>
-      <button class="secondary" id="settings-save-btn">Save</button>
+    <form id="settings-form" novalidate></form>
+    <div class="settings-bar">
+      <div id="settings-status" class="hint"></div>
+      <div class="row">
+        <button class="secondary" id="settings-reload-btn" type="button">Undo changes</button>
+        <button class="primary" id="settings-save-btn" type="button" style="margin-top:0;">Save</button>
+      </div>
     </div>
-    <div id="settings-status" class="hint"></div>
 
     <details style="margin-top:1.25rem;">
       <summary>Sound check</summary>
@@ -1133,12 +1161,184 @@
 
   // ═══════════════════════ SETTINGS ══════════════════════════════
 
-  async function loadSettingsView() {
-    const s = await api('/api/settings');
-    $('settings-json').value = JSON.stringify(s, null, 2);
+  /**
+   * One row per editable setting. `scale` converts between what is stored and what is shown
+   * (cents as dollars, ms as seconds). Not listed, deliberately: captureCrop* and emptyPlatform*
+   * (Calibrate owns them) and synth* (the Synth cue tuner below owns them, since tuning by ear
+   * needs the sound to change while dragging).
+   */
+  const SETTINGS_FORM = [
+    { group: 'Recognition', fields: [
+      { key: 'minScore', label: 'Minimum match score', type: 'number', min: 0, max: 1, step: 0.01,
+        help: 'Below this, the card goes to extras/bulk. Real matches usually score 0.7–0.9.' },
+      { key: 'minGap', label: 'Minimum lead over runner-up', type: 'number', min: 0, max: 0.2, step: 0.005,
+        help: 'How far the best match must beat the second best. Raise it if similar printings get mixed up.' },
+      { key: 'straightenEnabled', label: 'Straighten tilted cards', type: 'toggle',
+        help: 'Rotates and crops to the card before matching.' },
+      { key: 'ocrEnabled', label: 'Read card titles', type: 'toggle',
+        help: 'Uses the printed name to confirm or rescue a match.' },
+      { key: 'ocrMinSim', label: 'Title match strictness', type: 'number', min: 0.5, max: 1, step: 0.01,
+        help: '0.80 has had no wrong rescues. Tighten to 0.85 at the first wrong route.' },
+    ] },
+    { group: 'Run defaults', fields: [
+      { key: 'defaultThresholdCents', label: 'Keeper threshold', type: 'number', unit: '$', scale: 0.01, min: 0, step: 0.01,
+        help: 'Starting value on the Card Sorter setup screen.' },
+      { key: 'defaultCondition', label: 'Assumed condition', type: 'select',
+        options: ['Near Mint', 'Lightly Played', 'Moderately Played', 'Heavily Played', 'Damaged'] },
+      { key: 'hopperEmptyTimeoutMs', label: 'Hopper empty after', type: 'number', unit: 's', scale: 0.001, min: 1, step: 1,
+        help: 'No card for this long ends the run.' },
+    ] },
+    { group: 'Sound', fields: [
+      { key: 'soundEnabled', label: 'Sound cues', type: 'toggle' },
+      { key: 'soundVolume', label: 'Volume', type: 'range', min: 0, max: 1, step: 0.05 },
+      { key: 'soundPack', label: 'Cue sound', type: 'select', options: ['synth', 'tones', 'machine'],
+        help: 'Changing this means re-teaching the X1PRO\'s Sound Learn. See Sound check below.' },
+    ] },
+    { group: 'Capture timing', advanced: true, fields: [
+      { key: 'captureIntervalMs', label: 'Frame check interval', type: 'number', unit: 'ms', min: 50, step: 10 },
+      { key: 'stableFrames', label: 'Still frames before capture', type: 'number', min: 1, step: 1 },
+      { key: 'frameDiffThreshold', label: 'Motion threshold', type: 'number', min: 1, step: 1 },
+      { key: 'confirmMinSpanMs', label: 'Confirm window', type: 'number', unit: 'ms', min: 0, step: 50 },
+      { key: 'confirmMaxDrift', label: 'Confirm max drift', type: 'number', min: 0, step: 1 },
+      { key: 'confirmMaxAttempts', label: 'Confirm attempts before stall', type: 'number', min: 1, step: 1 },
+      { key: 'cardPresenceMinDiff', label: 'Card presence threshold', type: 'number', min: 0, step: 1,
+        help: 'Difference from the empty platform that counts as a card.' },
+      { key: 'toneSettleMs', label: 'Settle after cue', type: 'number', unit: 'ms', min: 0, step: 50 },
+    ] },
+    { group: 'Recognition (advanced)', advanced: true, fields: [
+      { key: 'minCardScore', label: 'Not-a-card floor', type: 'number', min: 0, max: 1, step: 0.01,
+        help: 'Only relabels; never changes routing.' },
+      { key: 'ocrMinTitleChars', label: 'Shortest title to read', type: 'number', min: 1, step: 1 },
+      { key: 'scanMaxRetries', label: 'Scan retries', type: 'number', min: 0, step: 1 },
+      { key: 'scanRetryBackoffMs', label: 'Retry backoff', type: 'number', unit: 'ms', min: 0, step: 100 },
+      { key: 'cacheTtlHours', label: 'Catalog refresh after', type: 'number', unit: 'h', min: 1, step: 1 },
+    ] },
+    { group: 'Tones pack', advanced: true, fields: [
+      { key: 'toneAcceptHz', label: 'Accept pitch', type: 'number', unit: 'Hz', min: 300, max: 5000, step: 1 },
+      { key: 'toneRejectHz', label: 'Reject pitch', type: 'number', unit: 'Hz', min: 300, max: 5000, step: 1 },
+      { key: 'toneAcceptGain', label: 'Accept level', type: 'number', min: 0, max: 1, step: 0.01 },
+      { key: 'toneRejectGain', label: 'Reject level', type: 'number', min: 0, max: 1, step: 0.01 },
+      { key: 'toneAcceptMs', label: 'Accept length', type: 'number', unit: 'ms', min: 50, step: 10 },
+      { key: 'toneRejectMs', label: 'Reject length', type: 'number', unit: 'ms', min: 50, step: 10 },
+      { key: 'toneDurationMs', label: 'Default length', type: 'number', unit: 'ms', min: 50, step: 10 },
+      { key: 'toneRampMs', label: 'Fade in/out', type: 'number', unit: 'ms', min: 0, step: 5 },
+    ] },
+    { group: 'CSV export', advanced: true, fields: [
+      { key: 'csvColumns', label: 'Columns', type: 'json',
+        help: 'One { "header", "field" } per column, in export order.' },
+    ] },
+  ];
+  const SETTINGS_FIELDS = SETTINGS_FORM.flatMap((g) => g.fields);
+
+  let settingsBase = null; // the saved settings the form was rendered from
+
+  const roundShown = (n) => Math.round(n * 1e6) / 1e6;
+  function shownValue(f, v) {
+    if (f.type === 'json') return JSON.stringify(v, null, 2);
+    if (f.scale && Number.isFinite(v)) return roundShown(v * f.scale);
+    return v;
+  }
+
+  function renderSettingsForm(s) {
+    settingsBase = s;
+    const fieldHtml = (f) => {
+      const id = 'set-' + f.key;
+      const help = f.help ? `<div class="help">${f.help}</div>` : '';
+      const open = `<div class="settings-field" data-key="${f.key}">`;
+      if (f.type === 'toggle') {
+        return open + `<div class="toggle-row"><label for="${id}">${f.label}</label>` +
+          `<span class="switch"><input type="checkbox" id="${id}"><span></span></span></div>${help}</div>`;
+      }
+      if (f.type === 'select') {
+        return open + `<label for="${id}">${f.label}</label><select id="${id}"></select>${help}</div>`;
+      }
+      if (f.type === 'range') {
+        return open + `<label for="${id}">${f.label}</label><div class="range-row">` +
+          `<input type="range" id="${id}" min="${f.min}" max="${f.max}" step="${f.step}"><output></output></div>${help}</div>`;
+      }
+      if (f.type === 'json') {
+        return open + `<label for="${id}">${f.label}</label><textarea id="${id}" spellcheck="false"></textarea>${help}</div>`;
+      }
+      const attrs = ['min', 'max', 'step'].filter((a) => f[a] != null).map((a) => `${a}="${f[a]}"`).join(' ');
+      const input = `<input type="number" inputmode="decimal" id="${id}" ${attrs}>`;
+      const body = !f.unit ? input
+        : f.unit === '$' ? `<div class="unit-row"><span class="unit">$</span>${input}</div>`
+        : `<div class="unit-row">${input}<span class="unit">${f.unit}</span></div>`;
+      return open + `<label for="${id}">${f.label}</label>${body}${help}</div>`;
+    };
+    const groupHtml = (g) => `<div class="settings-group"><h2>${g.group}</h2>${g.fields.map(fieldHtml).join('')}</div>`;
+    $('settings-form').innerHTML = SETTINGS_FORM.filter((g) => !g.advanced).map(groupHtml).join('') +
+      `<details><summary>Advanced</summary>${SETTINGS_FORM.filter((g) => g.advanced).map(groupHtml).join('')}</details>`;
+
+    // Values are set as properties, not spliced into the HTML, so nothing needs escaping.
+    for (const f of SETTINGS_FIELDS) {
+      const el = $('set-' + f.key);
+      const v = shownValue(f, s[f.key]);
+      if (f.type === 'toggle') el.checked = !!v;
+      else if (f.type === 'select') {
+        // A saved value outside the usual list (renamed condition, say) still shows and survives.
+        const opts = f.options.includes(v) ? f.options : [v].concat(f.options);
+        el.innerHTML = opts.map(() => '<option></option>').join('');
+        opts.forEach((o, i) => { el.options[i].value = o; el.options[i].textContent = o; });
+        el.value = v;
+      } else {
+        el.value = v ?? '';
+        if (f.type === 'range') el.nextElementSibling.textContent = Math.round(v * 100) + '%';
+      }
+    }
     $('settings-status').textContent = '';
   }
-  $('settings-reload-btn').addEventListener('click', loadSettingsView);
+
+  /** Reads one field back into its stored form. Throws a readable message on bad input. */
+  function readField(f) {
+    const el = $('set-' + f.key);
+    if (f.type === 'toggle') return el.checked;
+    if (f.type === 'select') return el.value;
+    if (f.type === 'json') {
+      let v;
+      try { v = JSON.parse(el.value); } catch (e) { throw new Error(f.label + ': not valid JSON'); }
+      if (!Array.isArray(v)) throw new Error(f.label + ': must be a list');
+      return v;
+    }
+    const n = Number(el.value);
+    if (el.value.trim() === '' || !Number.isFinite(n)) throw new Error(f.label + ': enter a number');
+    if (f.min != null && n < f.min) throw new Error(`${f.label}: at least ${f.min}`);
+    if (f.max != null && n > f.max) throw new Error(`${f.label}: at most ${f.max}`);
+    return f.scale ? roundShown(n / f.scale) : n;
+  }
+
+  /** Changed keys only, so a save never rewrites settings this form didn't touch. */
+  function settingsChanges() {
+    const patch = {};
+    const errors = [];
+    for (const f of SETTINGS_FIELDS) {
+      const row = document.querySelector(`.settings-field[data-key="${f.key}"]`);
+      try {
+        const v = readField(f);
+        row.classList.remove('invalid');
+        const changed = JSON.stringify(v) !== JSON.stringify(settingsBase[f.key]);
+        row.classList.toggle('dirty', changed);
+        if (changed) patch[f.key] = v;
+      } catch (err) {
+        row.classList.add('invalid', 'dirty');
+        errors.push(err.message);
+      }
+    }
+    return { patch, errors };
+  }
+
+  $('settings-form').addEventListener('input', (e) => {
+    if (e.target.type === 'range') e.target.nextElementSibling.textContent = Math.round(Number(e.target.value) * 100) + '%';
+    const { patch, errors } = settingsChanges();
+    const n = Object.keys(patch).length;
+    $('settings-status').textContent = errors.length ? errors[0] : n ? `${n} unsaved change${n === 1 ? '' : 's'}` : '';
+  });
+  $('settings-form').addEventListener('submit', (e) => e.preventDefault());
+
+  async function loadSettingsView() {
+    renderSettingsForm(await api('/api/settings'));
+  }
+  $('settings-reload-btn').addEventListener('click', () => renderSettingsForm(settingsBase || appSettings));
 
   // Sound check. Each click is its own user gesture, so unlock() here too — a run started on a
   // different page load doesn't leave this page's context resumed.
@@ -1222,10 +1422,15 @@
   });
 
   $('settings-save-btn').addEventListener('click', async () => {
+    const { patch, errors } = settingsChanges();
+    if (errors.length) { $('settings-status').textContent = 'Fix first: ' + errors.join('; '); return; }
+    if (!Object.keys(patch).length) { $('settings-status').textContent = 'Nothing to save.'; return; }
     try {
-      const parsed = JSON.parse($('settings-json').value);
-      applySettings(await api('/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(parsed) }));
-      $('settings-status').textContent = 'Saved.';
+      applySettings(await api('/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch) }));
+      renderSettingsForm(appSettings);
+      const n = Object.keys(patch).length;
+      $('settings-status').textContent = `Saved ${n} change${n === 1 ? '' : 's'}.`
+        + (patch.soundPack ? ' Re-teach Sound Learn before the next run.' : '');
     } catch (err) {
       $('settings-status').textContent = 'Error: ' + err.message;
     }
@@ -1235,7 +1440,18 @@
 
   // ═══════════════════════ boot ══════════════════════════════════
 
-  loadSetup().catch((err) => {
+  // Deep links: Set Builder opens Calibrate and Settings here as index.html?from=sets#calibrate.
+  // Only views that stand alone are reachable this way; Run and Summary need a live session.
+  const DEEP_LINK_VIEWS = ['calibrate', 'settings', 'search'];
+  const fromSets = new URLSearchParams(location.search).get('from') === 'sets';
+  if (fromSets) $('set-builder-link').textContent = '← Back to Set Builder';
+
+  loadSetup().then(() => {
+    const view = location.hash.slice(1);
+    // Clicking the nav button rather than calling showView(), so the view's own setup (camera,
+    // form load) runs exactly as it does on a tap.
+    if (DEEP_LINK_VIEWS.includes(view)) document.querySelector(`header nav button[data-view="${view}"]`).click();
+  }).catch((err) => {
     $('setup-error').innerHTML = `<div class="error-box">Failed to load setup data: ${err.message}</div>`;
   });
 })();

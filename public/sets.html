@@ -249,6 +249,8 @@
     <button data-view="run">Run</button>
     <button data-view="binder">Binder</button>
     <button data-view="missing">Missing</button>
+    <a class="nav-link" href="/index.html?from=sets#calibrate">Calibrate</a>
+    <a class="nav-link" href="/index.html?from=sets#settings">Settings</a>
     <a class="nav-link" href="/runs.html">Runs</a>
     <a class="nav-link" href="/labels.html">Label samples</a>
     <a class="nav-link" href="/">← Sorter</a>
@@ -1401,8 +1403,8 @@
   (async function boot() {
     try {
       appSettings = await api('/api/settings');
-      // This page has no settings editor — it reads once at boot. Volume/enabled changes are made
-      // on the price-sorter page's Settings view and picked up here on next load.
+      // This page has no settings editor — it reads once at boot. Changes are made on the
+      // price-sorter page's Settings view (linked in the nav) and picked up here on next load.
       audio.configure(appSettings);
       const review = new URLSearchParams(location.search).get('review');
       if (review) {
