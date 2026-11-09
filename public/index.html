@@ -237,6 +237,10 @@
       </div>
     </div>
 
+    <label for="max-keepers-input">Max keepers</label>
+    <input type="number" id="max-keepers-input" min="1" step="1" inputmode="numeric" placeholder="Unlimited" />
+    <p class="hint">The run stops by itself once this many keepers are sorted. Leave empty for no limit.</p>
+
     <details>
       <summary>Advanced — confidence thresholds</summary>
       <div class="row">
@@ -674,6 +678,7 @@
     if (saved.condition && hasOption($('condition-select'), saved.condition)) $('condition-select').value = saved.condition;
     if (Number.isFinite(saved.thresholdCents)) $('threshold-input').value = (saved.thresholdCents / 100).toFixed(2);
     if (saved.location) $('location-input').value = saved.location;
+    if (Number.isInteger(saved.maxKeepers) && saved.maxKeepers >= 1) $('max-keepers-input').value = saved.maxKeepers;
   }
 
   async function loadSetup() {
@@ -735,6 +740,8 @@
     const gameOpt = gameSelect.options[gameSelect.selectedIndex];
     const setIds = Array.from($('set-select').selectedOptions).map((o) => Number(o.value));
     const location = $('location-input').value.trim();
+    const maxRaw = $('max-keepers-input').value.trim();
+    const maxKeepersInput = maxRaw === '' ? null : Number(maxRaw);
 
     if (setIds.length === 0) {
       $('setup-error').innerHTML = '<div class="error-box">Select at least one set — the recognition step matches against the selected set\'s cards, not the whole game.</div>';
@@ -742,6 +749,10 @@
     }
     if (!location) {
       $('setup-error').innerHTML = '<div class="error-box">Location is required — this is stamped into every keeper row on export.</div>';
+      return;
+    }
+    if (maxKeepersInput !== null && !(Number.isInteger(maxKeepersInput) && maxKeepersInput >= 1)) {
+      $('setup-error').innerHTML = '<div class="error-box">Max keepers must be a whole number of at least 1, or empty for no limit.</div>';
       return;
     }
 
@@ -758,8 +769,9 @@
     };
     remember(SETUP_KEY, {
       gameId: body.gameId, setIds, variant: body.variant, condition: body.condition,
-      thresholdCents: body.thresholdCents, location,
+      thresholdCents: body.thresholdCents, location, maxKeepers: maxKeepersInput,
     });
+    maxKeepers = maxKeepersInput;
 
     // Starting a run pre-warms the catalog + embeddings for every selected set server-side
     // (session.ts) — near-instant on a set that's been used before, but can take real time
@@ -1082,6 +1094,10 @@
     },
   };
 
+  /** Keeper cap for the run in progress; null means unlimited. Set from Setup on Start Run. */
+  let maxKeepers = null;
+  const keeperLimitReached = () => maxKeepers != null && counts.keeper >= maxKeepers;
+
   async function startRun() {
     if (machineCtl.conn) return startMachineRun();
     $('phase-badge').textContent = 'Audio cues — not routing the machine directly';
@@ -1094,7 +1110,7 @@
       video: $('camera'),
       cropGuide: $('run-crop-guide'),
       settings: appSettings,
-      onHopperEmpty: () => finishRun(true),
+      onHopperEmpty: () => finishRun('hopper-empty'),
       onStall: (reason) => showStall(reason),
       onNoCard: (diff) => setBanner('armed', 'WAITING — no card on platform (' + diff.toFixed(1) + ')'),
       onCapture: (blob, meta) => {
@@ -1147,7 +1163,7 @@
       conn: machineCtl.conn,
       onLog: (m) => console.log('[x1pro-run]', m),
       onState: (label) => setBanner('armed', label),
-      onHopperEmpty: () => finishRun(true),
+      onHopperEmpty: () => finishRun('hopper-empty'),
       onCardHeld: async () => {
         setBanner('scanning', 'SCANNING…');
         const { blob } = await rig.captureNow();
@@ -1158,8 +1174,11 @@
         recordResult(result);
         const keeper = result.decision === 'keeper';
         setBanner(result.decision, keeper ? 'KEEPER' : 'BULK');
-        return keeper ? ROUTE.ACCEPT : ROUTE.REJECT;
+        const routeId = keeper ? ROUTE.ACCEPT : ROUTE.REJECT;
+        // last:true makes the driver route this card and then stop instead of feeding another.
+        return keeperLimitReached() ? { routeId, last: true } : routeId;
       },
+      onLastRouted: () => finishRun('keeper-limit'),
       onPause: (err) => {
         setBanner('stalled', 'PAUSED');
         ToneEmitter.alert();
@@ -1188,6 +1207,8 @@
       $('stall-banner').hidden = true;
       await ToneEmitter.emit(result.decision);
       recordResult(result);
+      // The tone above already sent this card to its pile; stop before arming for the next one.
+      if (keeperLimitReached()) { await finishRun('keeper-limit'); return; }
       rig.rearm();
       setBanner('armed', 'ARMED');
     } catch (err) {
@@ -1265,7 +1286,7 @@
 
   function updateCounters() {
     $('count-total').textContent = counts.total;
-    $('count-keeper').textContent = counts.keeper;
+    $('count-keeper').textContent = maxKeepers != null ? counts.keeper + '/' + maxKeepers : counts.keeper;
     $('count-bulk').textContent = counts.bulk;
     $('box-label').textContent = currentBoxLabel;
   }
@@ -1277,9 +1298,10 @@
     updateCounters();
   });
 
-  $('finish-run-btn').addEventListener('click', () => finishRun(false));
+  $('finish-run-btn').addEventListener('click', () => finishRun());
 
-  async function finishRun(auto) {
+  /** reason: undefined (Finish tapped), 'hopper-empty' or 'keeper-limit'. */
+  async function finishRun(reason) {
     if (!rig || rig.isDone()) return;
     rig.markDone();
     rig.stop();
@@ -1287,7 +1309,8 @@
     if (session) {
       try { await api('/api/session/' + session.id + '/complete', { method: 'POST' }); } catch (e) { /* best effort */ }
     }
-    $('summary-heading').textContent = auto ? 'Run complete — hopper looks empty' : 'Run complete';
+    $('summary-heading').textContent = reason === 'hopper-empty' ? 'Run complete — hopper looks empty'
+      : reason === 'keeper-limit' ? `Run complete — reached ${maxKeepers} keepers` : 'Run complete';
     $('summary-total').textContent = counts.total;
     $('summary-keeper').textContent = counts.keeper;
     $('summary-bulk').textContent = counts.bulk;
