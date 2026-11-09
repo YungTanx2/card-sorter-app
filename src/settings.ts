@@ -26,6 +26,27 @@ export function getSettings(): AppSettings {
   return resolved;
 }
 
+/**
+ * Checks a PUT /api/settings body before it is merged. Returns an error message, or null if the
+ * patch is fine. Every key must be one config/settings.json defines, and each value must have the
+ * same type as its bundled default: a typo'd key or a number sent as "" would otherwise be stored
+ * silently and only show up as odd behaviour mid-run. Keys whose default is null (the Calibrate
+ * baseline) take anything.
+ */
+export function validateSettingsPatch(patch: unknown): string | null {
+  if (!patch || typeof patch !== 'object' || Array.isArray(patch)) return 'Settings must be a JSON object.';
+  for (const [key, value] of Object.entries(patch)) {
+    if (!(key in bundledDefaults)) return `Unknown setting "${key}".`;
+    const def = (bundledDefaults as unknown as Record<string, unknown>)[key];
+    if (def === null) continue;
+    if (typeof def === 'number' && !(typeof value === 'number' && Number.isFinite(value))) return `"${key}" must be a number.`;
+    if (typeof def === 'boolean' && typeof value !== 'boolean') return `"${key}" must be true or false.`;
+    if (typeof def === 'string' && typeof value !== 'string') return `"${key}" must be text.`;
+    if (Array.isArray(def) && !Array.isArray(value)) return `"${key}" must be a list.`;
+  }
+  return null;
+}
+
 export function updateSettings(patch: Partial<AppSettings>): AppSettings {
   const merged = { ...getSettings(), ...patch };
   upsertRow.run(JSON.stringify(merged), Date.now());

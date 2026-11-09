@@ -7,7 +7,7 @@ import { fetchCategories, fetchSets, fetchVariants, fetchRarities, getCandidates
 import { scoreCandidates } from './embeddings';
 import { straightenCard } from './straighten';
 import sharp from 'sharp';
-import { getSettings, updateSettings } from './settings';
+import { getSettings, updateSettings, validateSettingsPatch } from './settings';
 import { StallError } from './errors';
 import {
   createSession, getSession, resumeSession, completeSession,
@@ -682,7 +682,9 @@ app.get('/api/settings', (_req, res) => {
 });
 
 app.put('/api/settings', (req, res) => {
-  res.json(updateSettings(req.body ?? {}));
+  const error = validateSettingsPatch(req.body ?? {});
+  if (error) { res.status(400).json({ error }); return; }
+  res.json(updateSettings(req.body));
 });
 
 const server = app.listen(PORT, () => {
