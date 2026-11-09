@@ -108,6 +108,9 @@
   }
   .crop-guide.suggested { border: 2px solid #22c55e; box-shadow: none; }
   .card-box { position: absolute; border: 2px solid #eab308; pointer-events: none; }
+  /* The photo the suggestion was made from, frozen over the live view: with the machine feeding,
+     the card is already in the reject bin by the time the suggestion is on screen. */
+  .rec-still { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
 
   .calib-wizard { margin-bottom: 1rem; padding: 0.85rem; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; }
   .calib-wizard h2 { font-size: 0.95rem; margin-bottom: 0.4rem; }
@@ -273,14 +276,23 @@
     <div class="calib-wizard">
       <h2>Recommend a setting</h2>
       <ol>
-        <li>Clear the platform, then tap <strong>Capture empty</strong>.</li>
-        <li>Put a card where the machine drops it, then tap <strong>Recommend</strong>.</li>
+        <li>Connect the X1PRO, with cards in the hopper and the platform clear.</li>
+        <li>Tap <strong>Feed a card &amp; recommend</strong>. The machine feeds one card, the app
+          photographs it where it actually lands, then sends it to the reject bin.</li>
         <li>Check the green box, tap <strong>Apply</strong>, then <strong>Save crop</strong>.</li>
       </ol>
-      <div class="row">
-        <button class="secondary" id="rec-empty-btn">1. Capture empty</button>
-        <button class="secondary" id="rec-card-btn" disabled>2. Recommend</button>
+      <div class="machine-row" style="margin-bottom:.6rem;">
+        <button class="secondary" id="calib-connect-btn">Connect X1PRO (Bluetooth)</button>
+        <span class="machine-state" id="calib-machine-state"></span>
       </div>
+      <button class="primary" id="rec-feed-btn" disabled style="margin-top:0;">Feed a card &amp; recommend</button>
+      <details style="margin-top:.5rem;">
+        <summary>No machine? Place the card by hand</summary>
+        <div class="row" style="margin-top:.4rem;">
+          <button class="secondary" id="rec-empty-btn">1. Capture empty</button>
+          <button class="secondary" id="rec-card-btn" disabled>2. Recommend</button>
+        </div>
+      </details>
       <pre id="rec-result" class="hint" hidden></pre>
       <div id="rec-warnings"></div>
       <button class="primary" id="rec-apply-btn" hidden>3. Apply suggestion</button>
@@ -288,6 +300,7 @@
 
     <div class="camera-wrap">
       <video id="calib-camera" playsinline autoplay muted></video>
+      <img class="rec-still" id="rec-still" alt="" hidden>
       <div class="crop-guide" id="calib-crop-guide"></div>
       <div class="crop-guide suggested" id="rec-crop-guide" hidden></div>
       <div class="card-box" id="rec-card-box" hidden></div>
@@ -296,6 +309,7 @@
       <i style="border:2px dashed var(--accent)"></i>current
       <i style="border:2px solid #22c55e"></i>suggested
       <i style="border:2px solid #eab308"></i>card found
+      <br>Showing the photo the suggestion was made from; it goes back to live after Apply.
     </div>
 
     <label for="crop-size-slider">Capture window size — <span class="slider-value" id="crop-size-value"></span></label>
@@ -866,6 +880,7 @@
     $('rec-legend').hidden = true;
     $('rec-apply-btn').hidden = true;
     $('rec-warnings').innerHTML = '';
+    $('rec-still').hidden = true;
   }
 
   $('rec-empty-btn').addEventListener('click', () => {
@@ -885,17 +900,23 @@
     const v = $('calib-camera');
     if (!v.videoWidth || !recEmpty) return;
     clearSuggestion();
-    const cardFrame = snapshotFrame(v);
+    recommendFrom(snapshotFrame(v));
+  });
+
+  /** Detects the card in `cardFrame` against the empty-platform snapshot and shows the suggestion.
+   *  Returns false (with the reason shown) when no usable card was found. */
+  function recommendFrom(cardFrame) {
+    const v = $('calib-camera');
     const box = detectCardBox(recEmpty, cardFrame);
     if (!box || box.areaFrac < 0.03) {
       $('rec-result').textContent = "Couldn't find the card. Check it's fully on the platform and well lit, and that "
-        + 'nothing else moved since Capture empty (including the phone).';
-      return;
+        + 'nothing else moved since the empty photo (including the phone).';
+      return false;
     }
     if (box.areaFrac > 0.85) {
       $('rec-result').textContent = 'Almost the whole picture changed, which usually means the phone moved or the '
-        + 'lighting changed. Capture empty again, then Recommend.';
-      return;
+        + 'lighting changed. Try again.';
+      return false;
     }
     const rec = recommendCrop(box);
     // Presence threshold from how different this card looks from the empty platform inside the
@@ -908,6 +929,8 @@
 
     renderCropGuide($('rec-crop-guide'), rec.crop);
     renderCropGuide($('rec-card-box'), box);
+    $('rec-still').src = cardFrame.toDataURL('image/jpeg', 0.85);
+    $('rec-still').hidden = false;
     $('rec-crop-guide').hidden = false;
     $('rec-card-box').hidden = false;
     $('rec-legend').hidden = false;
@@ -923,6 +946,79 @@
     const warnings = rec.warnings.slice();
     if (cardDiff < 15) warnings.push('The card barely stands out from the platform here, so card detection may miss cards. Brighter or more even lighting would help.');
     $('rec-warnings').innerHTML = warnings.map((w) => `<div class="warn">⚠ ${w}</div>`).join('');
+    return true;
+  }
+
+  // ── Recommend with the machine feeding the card ─────────────────────────
+  // Shares the Setup tab's connection: a connection belongs to one page load, and a second
+  // X1ProConnection here would fight the first one for the same device. The Connect button below
+  // just presses Setup's (still inside this tap, which Android's Bluetooth picker requires).
+  $('calib-connect-btn').addEventListener('click', () => $('x1pro-connect-btn').click());
+  function renderCalibMachine() {
+    $('calib-machine-state').textContent = $('x1pro-state').textContent;
+    $('calib-machine-state').className = $('x1pro-state').className;
+    $('calib-connect-btn').textContent = $('x1pro-connect-btn').textContent;
+    $('calib-connect-btn').disabled = $('x1pro-connect-btn').disabled;
+    $('rec-feed-btn').disabled = !machineCtl.conn || calibFeeding;
+  }
+  let calibFeeding = false;
+  const machineWatch = new MutationObserver(renderCalibMachine);
+  machineWatch.observe($('x1pro-state'), { childList: true, characterData: true, subtree: true });
+  machineWatch.observe($('x1pro-connect-btn'), { childList: true, attributes: true, attributeFilter: ['disabled'] });
+
+  /** How long the held card sits before its photo, on top of the driver's own frame-lag delay:
+   *  long enough for the phone's auto-exposure to settle after a dark card arrives. Free here —
+   *  the machine holds the card for as long as the app takes to answer. */
+  const CALIB_SETTLE_MS = 700;
+
+  $('rec-feed-btn').addEventListener('click', async () => {
+    const v = $('calib-camera');
+    if (!machineCtl.conn) { renderCalibMachine(); return; }
+    if (!v.videoWidth) { $('calib-status').textContent = 'Start the camera first.'; return; }
+    calibFeeding = true;
+    renderCalibMachine();
+    clearSuggestion();
+    $('rec-result').hidden = false;
+
+    // The empty photo comes first: before a feed the platform is clear (prefeed stages the next
+    // card at the hopper, out of the camera's view).
+    recEmpty = snapshotFrame(v);
+    pendingBaseline = { baseline: null, crop: null, snap: true };
+    resampleSnapBaseline();
+    $('rec-card-btn').disabled = false;
+
+    let cardFrame = null;
+    let finish;
+    const done = new Promise((r) => { finish = r; });
+    const d = new X1ProRunDriver({
+      conn: machineCtl.conn,
+      onLog: (m) => console.log('[calibrate]', m),
+      onState: (label) => { $('rec-result').textContent = 'Machine: ' + label.toLowerCase() + '…'; },
+      onCardHeld: async () => {
+        await new Promise((r) => setTimeout(r, CALIB_SETTLE_MS));
+        cardFrame = snapshotFrame(v);
+        // last:true: route this one card, then stop instead of feeding another.
+        return { routeId: ROUTE.REJECT, last: true };
+      },
+      onLastRouted: () => finish('routed'),
+      onHopperEmpty: () => finish('empty'),
+      onPause: (err) => finish(err),
+    });
+    try { await d.start(); } catch (err) { finish(err); }
+    const outcome = await done;
+    await d.stop();
+    calibFeeding = false;
+    renderCalibMachine();
+
+    if (outcome === 'empty') {
+      $('rec-result').textContent = 'The machine found no card to feed. Load the hopper and try again.';
+    } else if (outcome !== 'routed') {
+      $('rec-result').textContent = 'The machine stopped: ' + (outcome && outcome.message ? outcome.message : outcome)
+        + '. Check the platform is clear, then try again.';
+    } else if (recommendFrom(cardFrame)) {
+      $('rec-feed-btn').textContent = 'Feed another card';
+      $('rec-warnings').insertAdjacentHTML('beforeend', '<div class="hint">The calibration card went to the reject bin.</div>');
+    }
   });
 
   $('rec-apply-btn').addEventListener('click', () => {
@@ -938,6 +1034,8 @@
     renderFraming();
     renderPresence();
     $('rec-crop-guide').hidden = true;
+    $('rec-card-box').hidden = true;
+    $('rec-still').hidden = true;
     $('rec-legend').hidden = true;
     $('rec-apply-btn').hidden = true;
     $('calib-status').textContent = 'Suggestion applied. Tap Save crop to keep it.';
@@ -1042,6 +1140,8 @@
     pendingPresenceMinDiff = null;
     recEmpty = null;
     clearSuggestion();
+    renderCalibMachine();
+    $('rec-feed-btn').textContent = 'Feed a card & recommend';
     $('rec-card-btn').disabled = true;
     $('rec-result').hidden = true;
     updateCalibPreview();
