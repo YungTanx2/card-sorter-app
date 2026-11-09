@@ -554,7 +554,8 @@ window.CardSorterCapture = (function () {
    * shows up as "the threshold needs to be weirdly high on this rig" and never gets diagnosed.
    */
   function sampleGray(video, crop, ctx) {
-    const { sx, sy, sw, sh } = cropRectPx(video.videoWidth, video.videoHeight, crop);
+    // A frame snapshot (canvas) has width/height where a <video> has videoWidth/videoHeight.
+    const { sx, sy, sw, sh } = cropRectPx(video.videoWidth || video.width, video.videoHeight || video.height, crop);
     ctx.drawImage(video, sx, sy, sw, sh, 0, 0, DIFF_W, DIFF_H);
     const data = ctx.getImageData(0, 0, DIFF_W, DIFF_H).data;
     const gray = new Uint8ClampedArray(DIFF_W * DIFF_H);
@@ -567,7 +568,7 @@ window.CardSorterCapture = (function () {
   /** Scratch canvas for callers that have a <video> but no CaptureRig — i.e. Calibrate. */
   let standaloneCtx = null;
   function sampleGrayFromVideo(video, crop) {
-    if (!video || !video.videoWidth) return null;
+    if (!video || !(video.videoWidth || video.width)) return null;
     if (!standaloneCtx) {
       const c = document.createElement('canvas');
       c.width = DIFF_W;
@@ -622,9 +623,141 @@ window.CardSorterCapture = (function () {
     }
   }
 
+  // ═══════════════════ CALIBRATION RECOMMENDATION ═══════════════════
+
+  /** A still copy of the current video frame at full resolution, so "empty" and "card" can be
+   *  compared after the fact, and the baseline re-sampled under whatever crop gets recommended. */
+  function snapshotFrame(video) {
+    const c = document.createElement('canvas');
+    c.width = video.videoWidth;
+    c.height = video.videoHeight;
+    c.getContext('2d').drawImage(video, 0, 0);
+    return c;
+  }
+
+  const DETECT_W = 160;
+
+  function fullFrameGray(src, w, h) {
+    const c = document.createElement('canvas');
+    c.width = w; c.height = h;
+    const ctx = c.getContext('2d', { willReadFrequently: true });
+    ctx.drawImage(src, 0, 0, w, h);
+    const data = ctx.getImageData(0, 0, w, h).data;
+    const g = new Float32Array(w * h);
+    for (let i = 0, p = 0; i < data.length; i += 4, p++) g[p] = data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114;
+    return g;
+  }
+
+  /**
+   * Finds the card as "what changed since the empty-platform snapshot", returning its bounding box
+   * as frame fractions ({left, top, width, height, areaFrac}), or null if nothing changed.
+   *
+   * Differencing against the empty platform sidesteps what a colour/darkness mask has to be tuned
+   * around (src/straighten.ts): the dark backdrop strip and the platform's grooves are in both
+   * frames and cancel out. The threshold sits above the MEDIAN difference rather than at a fixed
+   * level, because a card entering the frame shifts the phone's auto-exposure and brightens or
+   * darkens the whole platform a little. Light parts of the card (the text box) can match the
+   * platform and split the card into pieces, so pieces near the biggest one are folded into its box.
+   */
+  function detectCardBox(emptySrc, cardSrc) {
+    const srcW = emptySrc.videoWidth || emptySrc.width, srcH = emptySrc.videoHeight || emptySrc.height;
+    const W = DETECT_W, H = Math.max(1, Math.round(W * srcH / srcW));
+    const a = fullFrameGray(emptySrc, W, H), b = fullFrameGray(cardSrc, W, H);
+    const diff = new Float32Array(W * H);
+    for (let i = 0; i < diff.length; i++) diff[i] = Math.abs(a[i] - b[i]);
+    const sorted = Array.from(diff).sort((x, y) => x - y);
+    const thresh = Math.max(25, sorted[sorted.length >> 1] + 20);
+    const mask = new Uint8Array(W * H);
+    for (let i = 0; i < diff.length; i++) mask[i] = diff[i] > thresh ? 1 : 0;
+
+    // 4-connected components, each with its pixel count and bounding box
+    const seen = new Uint8Array(W * H);
+    const comps = [];
+    for (let s0 = 0; s0 < W * H; s0++) {
+      if (!mask[s0] || seen[s0]) continue;
+      let n = 0, x0 = W, y0 = H, x1 = -1, y1 = -1;
+      const stack = [s0];
+      seen[s0] = 1;
+      while (stack.length) {
+        const p = stack.pop();
+        n++;
+        const x = p % W, y = (p / W) | 0;
+        if (x < x0) x0 = x;
+        if (x > x1) x1 = x;
+        if (y < y0) y0 = y;
+        if (y > y1) y1 = y;
+        if (x > 0 && mask[p - 1] && !seen[p - 1]) { seen[p - 1] = 1; stack.push(p - 1); }
+        if (x < W - 1 && mask[p + 1] && !seen[p + 1]) { seen[p + 1] = 1; stack.push(p + 1); }
+        if (y > 0 && mask[p - W] && !seen[p - W]) { seen[p - W] = 1; stack.push(p - W); }
+        if (y < H - 1 && mask[p + W] && !seen[p + W]) { seen[p + W] = 1; stack.push(p + W); }
+      }
+      comps.push({ n, x0, y0, x1, y1 });
+    }
+    if (!comps.length) return null;
+    comps.sort((p, q) => q.n - p.n);
+    const box = Object.assign({}, comps[0]);
+    const near = Math.round(W * 0.03);
+    for (const c of comps.slice(1)) {
+      if (c.n < comps[0].n * 0.02) break;
+      if (c.x0 <= box.x1 + near && c.x1 >= box.x0 - near && c.y0 <= box.y1 + near && c.y1 >= box.y0 - near) {
+        box.x0 = Math.min(box.x0, c.x0); box.y0 = Math.min(box.y0, c.y0);
+        box.x1 = Math.max(box.x1, c.x1); box.y1 = Math.max(box.y1, c.y1);
+      }
+    }
+    const out = { left: box.x0 / W, top: box.y0 / H, width: (box.x1 - box.x0 + 1) / W, height: (box.y1 - box.y0 + 1) / H };
+    out.areaFrac = out.width * out.height;
+    return out;
+  }
+
+  /** Margin around the card. Generous rather than tight: this is one placement, and cards land a
+   *  little differently (and tilted) each time; the straightener crops to the card anyway. */
+  const RECOMMEND_MARGIN = 1.12;
+
+  /**
+   * The slider values (captureCropZoomPct, captureCropVPosPct) whose capture window covers `box`
+   * with a margin, by inverting getCrop(). The window is always centred left-to-right, so a card
+   * that lands off-centre is reported through `warnings` rather than corrected.
+   */
+  function recommendCrop(box) {
+    const warnings = [];
+    let zoom = Math.max(box.width / BASE_CROP_W, box.height / BASE_CROP_H) * RECOMMEND_MARGIN * 100;
+    if (zoom > 150) warnings.push('The card is bigger than the largest capture window. Move the phone further from the platform.');
+    if (zoom < 50) warnings.push('The card is small in frame. Moving the phone closer would give recognition more detail.');
+    zoom = Math.round(clamp(zoom, 50, 150));
+    const h = getCrop({ captureCropZoomPct: zoom, captureCropVPosPct: 50 }).height;
+    const cy = box.top + box.height / 2;
+    const vpos = h >= 0.999 ? 50 : Math.round(clamp((cy - h / 2) / (1 - h), 0, 1) * 100);
+    const crop = getCrop({ captureCropZoomPct: zoom, captureCropVPosPct: vpos });
+    const cx = box.left + box.width / 2;
+    if (Math.abs(cx - 0.5) > 0.05) {
+      const side = cx < 0.5 ? 'left' : 'right';
+      warnings.push(`The card sits ${Math.round(Math.abs(cx - 0.5) * 100)}% ${side} of centre, and the capture window is always centred. Nudge the phone ${side}.`);
+    }
+    const eps = 0.005;
+    if (box.left < crop.left - eps || box.left + box.width > crop.left + crop.width + eps
+      || box.top < crop.top - eps || box.top + box.height > crop.top + crop.height + eps) {
+      warnings.push('Part of the card still falls outside the suggested window.');
+    }
+    return { zoom, vpos, crop, warnings };
+  }
+
+  /**
+   * Sizes every camera preview box to its stream's real aspect ratio. The box used to be a fixed
+   * 3:4 with object-fit: cover, so any stream of another shape (the 1920x1080 we ask for, either
+   * way up) had its edges cropped off on screen — while the crop guides are positioned as
+   * fractions of that box, i.e. of the visible part only. The dashed guide then sat somewhere other
+   * than the region actually captured. Matching the box to the stream makes the guides exact.
+   */
+  document.querySelectorAll('.camera-wrap > video').forEach((v) => {
+    const fit = () => { if (v.videoWidth && v.videoHeight) v.parentElement.style.aspectRatio = v.videoWidth + ' / ' + v.videoHeight; };
+    v.addEventListener('loadedmetadata', fit);
+    v.addEventListener('resize', fit); // the stream rotates with the phone
+  });
+
   return {
     api, getCrop, renderCropGuide, cropRectPx, canvasToBlobUnderCap, ThumbPreview, CaptureRig,
     describeFraming, VIDEO_CONSTRAINTS, CLIP_INPUT_PX, STATE: S, MAX_UPLOAD_BYTES,
     sampleGrayFromVideo, encodeGray, decodeBaseline, meanAbsDiff,
+    snapshotFrame, detectCardBox, recommendCrop,
   };
 })();
