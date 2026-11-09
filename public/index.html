@@ -184,6 +184,7 @@
   .csv-links { display: flex; gap: 0.6rem; margin-top: 1rem; }
   .csv-links a { flex: 1; text-align: center; background: var(--surface2); border: 1px solid var(--border); color: var(--text); border-radius: 8px; padding: 0.7rem; text-decoration: none; font-size: 0.85rem; }
 </style>
+<link rel="stylesheet" href="/mobile.css" />
 </head>
 <body>
 
@@ -494,6 +495,7 @@
 
 </main>
 
+<script src="/mobile.js"></script>
 <script src="/capture.js"></script>
 <script src="/audio.js"></script>
 <script src="/x1pro-ble.js"></script>
@@ -509,6 +511,9 @@
     sampleGrayFromVideo, encodeGray, decodeBaseline, meanAbsDiff,
     snapshotFrame, detectCardBox, recommendCrop } = window.CardSorterCapture;
   const audio = window.CardSorterAudio;
+
+  MobileUI.collapseHints();
+  const setPicker = MobileUI.checkboxPicker(document.getElementById('set-select'), { noun: ['set', 'sets'] });
   const { X1ProRunDriver, ROUTE, connectControl } = window.X1ProRun;
 
   // ── tiny router ──────────────────────────────────────────────
@@ -663,6 +668,7 @@
     const wanted = new Set((saved.setIds || []).map(String));
     let any = false;
     for (const o of setSelect.options) if (wanted.has(o.value)) { o.selected = true; any = true; }
+    setPicker.sync();
     if (any) await refreshVariants();
     if (saved.variant && hasOption($('variant-select'), saved.variant)) $('variant-select').value = saved.variant;
     if (saved.condition && hasOption($('condition-select'), saved.condition)) $('condition-select').value = saved.condition;
