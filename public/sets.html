@@ -238,6 +238,7 @@
   }
   ol.filing li .cardno { flex: none; color: var(--muted); font-size: 0.75rem; min-width: 3.5rem; }
 </style>
+<link rel="stylesheet" href="/mobile.css" />
 </head>
 <body>
 
@@ -452,6 +453,7 @@
 
 </main>
 
+<script src="/mobile.js"></script>
 <script src="/capture.js"></script>
 <script src="/audio.js"></script>
 <script src="/x1pro-ble.js"></script>
@@ -463,6 +465,10 @@
   // Camera stack is shared with the price-sorter page (index.html) — see capture.js.
   const { api, ThumbPreview, CaptureRig } = window.CardSorterCapture;
   const audio = window.CardSorterAudio;
+
+  MobileUI.collapseHints();
+  MobileUI.checkboxPicker(document.getElementById('set-select'), { noun: ['set', 'sets'] });
+  MobileUI.checkboxPicker(document.getElementById('rarity-select'), { noun: ['excluded', 'excluded'] });
   const { X1ProRunDriver, ROUTE, connectControl } = window.X1ProRun;
 
   const $ = (id) => document.getElementById(id);

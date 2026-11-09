@@ -1,0 +1,66 @@
+/*
+ * Phone-first overrides shared by the run pages (index.html, sets.html). Loaded after each page's
+ * own <style>, so it wins on equal specificity. The phone is mounted on the rig and tapped in
+ * place, so the rule of thumb is: anything tappable is at least 44px tall.
+ */
+
+/* Header: title on its own line, nav as one horizontally scrollable row instead of wrapping */
+header { flex-wrap: wrap; padding: 0.5rem 0.75rem; }
+header h1 { width: 100%; }
+header nav {
+  flex-wrap: nowrap; overflow-x: auto; width: 100%; padding-bottom: 2px;
+  scrollbar-width: none; -webkit-overflow-scrolling: touch;
+}
+header nav::-webkit-scrollbar { display: none; }
+header nav button, header nav a.nav-link {
+  min-height: 40px; padding: 0 0.85rem; font-size: 0.85rem; white-space: nowrap; flex: none;
+}
+
+/* Tap targets */
+button.secondary { min-height: 44px; }
+button.primary { min-height: 52px; }
+select, input[type=text], input[type=number] { min-height: 44px; }
+input[type=range] { min-height: 36px; }
+input[type=checkbox] { width: 24px !important; height: 24px; flex: none; accent-color: var(--accent); }
+label:has(> input[type=checkbox]) { min-height: 44px; cursor: pointer; }
+.row { flex-wrap: wrap; }
+.row > * { min-width: 0; flex-basis: 8rem; }
+
+/* Section toggles ("Advanced", "Sound check", "Recent cards"): padding, not flex, so the
+   disclosure triangle stays */
+details > summary { padding: 0.75rem 0; margin-top: 0.25rem; }
+
+/* Long explanations, collapsed behind a tap (mobile.js collapseHints) */
+details.info { margin-top: 0.3rem; }
+details.info > summary {
+  margin-top: 0; padding: 0; font-size: 0.78rem; color: var(--muted); list-style: none;
+  display: flex; align-items: center; gap: 0.4rem; min-height: 32px; cursor: pointer;
+}
+details.info > summary::-webkit-details-marker { display: none; }
+details.info > summary .i {
+  flex: none; width: 1.2rem; height: 1.2rem; border-radius: 50%; border: 1px solid var(--muted);
+  display: inline-flex; align-items: center; justify-content: center; font-size: 0.7rem; font-style: normal;
+}
+details.info > summary .gist { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+details.info[open] > summary .gist { white-space: normal; }
+details.info > .hint { margin-top: 0.15rem; }
+
+/* Checkbox picker standing in for <select multiple> (mobile.js checkboxPicker) */
+select[multiple].picker-source { display: none; }
+.picker { border: 1px solid var(--border); border-radius: 8px; background: var(--surface); }
+.picker-head { display: flex; gap: 0.5rem; align-items: center; padding: 0.5rem; border-bottom: 1px solid var(--border); }
+.picker-head input {
+  flex: 1; min-width: 0; min-height: 40px; background: var(--surface2); border: 1px solid var(--border);
+  color: var(--text); border-radius: 8px; padding: 0 0.7rem; font-size: 1rem;
+}
+.picker-head .count { font-size: 0.8rem; color: var(--muted); white-space: nowrap; }
+.picker-head button { min-height: 40px; padding: 0 0.7rem; }
+.picker-list { max-height: 45vh; overflow-y: auto; }
+.picker-list label {
+  display: flex; align-items: center; gap: 0.7rem; margin: 0; padding: 0 0.75rem;
+  min-height: 48px; color: var(--text); font-size: 0.92rem; border-bottom: 1px solid var(--border);
+}
+.picker-list label:last-child { border-bottom: none; }
+.picker-list label.on { background: var(--surface2); }
+.picker-empty { padding: 0.75rem; font-size: 0.85rem; color: var(--muted); }
+.picker [hidden] { display: none !important; }
