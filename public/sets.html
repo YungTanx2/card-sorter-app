@@ -466,6 +466,18 @@
   const $ = (id) => document.getElementById(id);
   const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
+  // ── remembered choices (this phone only) ─────────────────────
+  // localStorage can throw or come back empty (private window, cleared site data), so every
+  // access is guarded and a miss just means "start from the defaults", exactly as before.
+  const RUN_OPTS_KEY = 'sb.run.v1';
+  const LAST_GOAL_KEY = 'sb.lastGoal.v1';
+  function remember(key, value) {
+    try { localStorage.setItem(key, JSON.stringify(value)); } catch (e) { /* not remembered */ }
+  }
+  function recall(key) {
+    try { return JSON.parse(localStorage.getItem(key) || 'null'); } catch (e) { return null; }
+  }
+
   // ── state ────────────────────────────────────────────────────
   let appSettings = null;
   let goals = [];
@@ -541,6 +553,7 @@
 
   async function selectGoal(goal) {
     currentGoal = goal;
+    remember(LAST_GOAL_KEY, goal.id);
     currentProgress = await api('/api/goals/' + goal.id + '/progress');
     liveFilled = currentProgress.filledSlots;
     binderPage = 1;
@@ -695,6 +708,11 @@
     $('run-goal-meta').textContent =
       `${currentGoal.gameName} · ${currentGoal.variant} · ${currentGoal.targetCopies}× each` +
       (p ? ` — ${p.filledSlots} of ${p.totalSlots} slots filled` : '');
+    const opts = recall(RUN_OPTS_KEY);
+    if (opts) {
+      $('dryrun-select').value = opts.dryRun === false ? 'live' : 'dry';
+      $('collect-samples').checked = opts.dryRun !== false && !!opts.collectSamples;
+    }
     loadPastSessions();
   }
 
@@ -845,6 +863,7 @@
     $('run-error').innerHTML = '';
     const dryRun = $('dryrun-select').value !== 'live';
     const collectSamples = dryRun && $('collect-samples').checked;
+    remember(RUN_OPTS_KEY, { dryRun, collectSamples });
     try {
       goalSession = await api('/api/goals/' + currentGoal.id + '/session', {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ dryRun }),
@@ -1415,6 +1434,12 @@
         }
       }
       await loadGoals();
+      // Reopen the goal last worked on, straight onto its run setup. A deleted goal just isn't
+      // found, and the list stays up.
+      const lastGoal = goals.find((g) => g.id === recall(LAST_GOAL_KEY));
+      if (lastGoal) {
+        try { await selectGoal(lastGoal); } catch (err) { console.warn('[sets] reopening last goal failed:', err); showView('goals'); }
+      }
     } catch (err) {
       $('goal-list').innerHTML = `<li class="error-box">Failed to load: ${esc(err.message)}</li>`;
     }

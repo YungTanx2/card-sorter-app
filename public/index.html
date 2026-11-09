@@ -581,6 +581,32 @@
 
   // ═══════════════════════ SETUP ═══════════════════════════════
 
+  // Remembered on this phone only. localStorage can throw or come back empty (private window,
+  // cleared site data), so every access is guarded and a miss means "start from the defaults".
+  const SETUP_KEY = 'cs.setup.v1';
+  function remember(key, value) {
+    try { localStorage.setItem(key, JSON.stringify(value)); } catch (e) { /* not remembered */ }
+  }
+  function recall(key) {
+    try { return JSON.parse(localStorage.getItem(key) || 'null'); } catch (e) { return null; }
+  }
+  const hasOption = (select, value) => Array.from(select.options).some((o) => o.value === String(value));
+
+  /** Puts back the last run's choices, in dependency order: the set list depends on the game and
+   *  the variant list on the sets. Anything no longer offered (a removed set, a renamed printing)
+   *  is skipped, leaving that control at its default. */
+  async function restoreSetup(saved) {
+    const setSelect = $('set-select');
+    const wanted = new Set((saved.setIds || []).map(String));
+    let any = false;
+    for (const o of setSelect.options) if (wanted.has(o.value)) { o.selected = true; any = true; }
+    if (any) await refreshVariants();
+    if (saved.variant && hasOption($('variant-select'), saved.variant)) $('variant-select').value = saved.variant;
+    if (saved.condition && hasOption($('condition-select'), saved.condition)) $('condition-select').value = saved.condition;
+    if (Number.isFinite(saved.thresholdCents)) $('threshold-input').value = (saved.thresholdCents / 100).toFixed(2);
+    if (saved.location) $('location-input').value = saved.location;
+  }
+
   async function loadSetup() {
     applySettings(await api('/api/settings'));
     $('threshold-input').value = (appSettings.defaultThresholdCents / 100).toFixed(2);
@@ -593,7 +619,10 @@
     // The snake_case spelling was a TCGTracking-era leftover that rendered every option as
     // "undefined" and stored the literal string "undefined" as the session's gameName.
     gameSelect.innerHTML = games.map((g) => `<option value="${g.id}" data-name="${g.displayName}">${g.displayName}</option>`).join('');
+    const saved = recall(SETUP_KEY);
+    if (saved && hasOption(gameSelect, saved.gameId)) gameSelect.value = String(saved.gameId);
     await onGameChange();
+    if (saved && Number(gameSelect.value) === saved.gameId) await restoreSetup(saved);
   }
 
   async function onGameChange() {
@@ -658,6 +687,10 @@
       minGap: Number($('min-gap-input').value),
       location,
     };
+    remember(SETUP_KEY, {
+      gameId: body.gameId, setIds, variant: body.variant, condition: body.condition,
+      thresholdCents: body.thresholdCents, location,
+    });
 
     // Starting a run pre-warms the catalog + embeddings for every selected set server-side
     // (session.ts) — near-instant on a set that's been used before, but can take real time
