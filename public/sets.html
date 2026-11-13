@@ -190,6 +190,26 @@
     color: #04210f; font-size: 0.6rem; font-weight: 700; border-radius: 4px; padding: 0.05rem 0.25rem;
   }
   .pocket.blank { background: transparent; border: none; }
+  .pocket.selected { outline: 3px solid var(--accent); outline-offset: 1px; }
+
+  /* Manual count stepper, shared by the Missing rows and the Binder's adjust bar. 44px squares:
+     the phone is mounted on the rig, so these get tapped at arm's length. */
+  .stepper { display: flex; align-items: center; gap: 0.35rem; flex: none; }
+  .stepper button {
+    width: 44px; height: 44px; padding: 0; font-size: 1.3rem; line-height: 1; border-radius: 8px;
+    background: var(--surface2); color: var(--text); border: 1px solid var(--border); cursor: pointer;
+  }
+  .stepper button:disabled { opacity: 0.35; }
+  .stepper .count { min-width: 2.6rem; text-align: center; font-size: 0.85rem; font-weight: 600; }
+  #missing-list li.filled { opacity: 0.55; }
+  #missing-list li.filled .count { color: var(--green); }
+  .adjust-bar {
+    display: flex; align-items: center; gap: 0.6rem; margin-top: 0.75rem; padding: 0.6rem 0.7rem;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 10px; font-size: 0.85rem;
+  }
+  .adjust-bar .who { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .adjust-bar[hidden] { display: none; }
+  .adjust-error { color: var(--red); font-size: 0.8rem; margin-top: 0.4rem; }
 
   /* ── Review strip ─────────────────────────────────────────── */
   ul.review { list-style: none; }
@@ -442,12 +462,23 @@
       <button class="secondary" id="binder-next">Next ›</button>
     </div>
     <div class="binder-page" id="binder-page"></div>
+    <p class="hint" id="binder-adjust-hint">Tap a pocket to add or remove a copy by hand.</p>
+    <div class="adjust-bar" id="binder-adjust" hidden>
+      <span class="who" id="binder-adjust-who"></span>
+      <div class="stepper">
+        <button id="binder-minus" aria-label="Remove one copy">−</button>
+        <span class="count" id="binder-adjust-count"></span>
+        <button id="binder-plus" aria-label="Add one copy">+</button>
+      </div>
+    </div>
+    <div class="adjust-error" id="binder-adjust-error"></div>
   </section>
 
   <!-- ══════════════════════ MISSING ══════════════════════ -->
   <section id="view-missing" hidden>
     <h2 id="missing-goal-name">—</h2>
     <p class="hint" id="missing-summary"></p>
+    <div class="adjust-error" id="missing-adjust-error"></div>
     <ul class="results" id="missing-list"></ul>
   </section>
 
@@ -1338,10 +1369,40 @@
     return li;
   }
 
+  // ═══════════════════════ MANUAL ADJUST ════════════════════════
+
+  /**
+   * Adds or removes one copy by hand ("I already own this one", "that one was a misread").
+   * Goes through the server's append-only adjustments log, the same store progress is derived
+   * from, so the change shows up everywhere — binder, missing list, goal list, the next run.
+   * Returns the new owned count.
+   */
+  async function adjustOwned(productId, delta) {
+    const r = await api('/api/goals/' + currentGoal.id + '/adjust', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ productId, delta, note: 'manual' }),
+    });
+    // Keep the cached progress in step so redrawing doesn't need a refetch.
+    const slot = currentProgress && currentProgress.slots.find((s) => s.productId === productId);
+    if (slot) {
+      const wasFilled = slot.owned >= slot.target;
+      slot.owned = r.owned;
+      const isFilled = slot.owned >= slot.target;
+      currentProgress.filledSlots += (isFilled ? 1 : 0) - (wasFilled ? 1 : 0);
+    }
+    return r.owned;
+  }
+
   // ═══════════════════════ BINDER ═══════════════════════════════
+
+  let binderSelected = null;  // productId of the pocket the adjust bar is showing
 
   async function renderBinder() {
     await refreshGoalProgress();
+    drawBinder();
+  }
+
+  function drawBinder() {
     const p = currentProgress;
     $('binder-goal-name').textContent = currentGoal.name;
     $('binder-summary').textContent =
@@ -1366,25 +1427,63 @@
         continue;
       }
       const have = slot.owned >= slot.target;
-      div.className = 'pocket' + (have ? '' : ' empty');
+      div.className = 'pocket' + (have ? '' : ' empty') + (slot.productId === binderSelected ? ' selected' : '');
       div.title = `${slot.number || ''} ${slot.name} — ${slot.owned}/${slot.target}`;
       div.innerHTML =
         (slot.imageUrl ? `<img src="${esc(slot.imageUrl)}" alt="${esc(slot.name)}" loading="lazy" />` : '') +
         (slot.target > 1 || have ? `<span class="have">${slot.owned}/${slot.target}</span>` : '') +
         `<span class="num">${esc(slot.number || slot.name)}</span>`;
+      div.addEventListener('click', () => {
+        binderSelected = binderSelected === slot.productId ? null : slot.productId;
+        $('binder-adjust-error').textContent = '';
+        drawBinder();
+      });
       grid.appendChild(div);
     }
+    drawBinderAdjust();
   }
 
-  $('binder-prev').addEventListener('click', () => { binderPage--; renderBinder(); });
-  $('binder-next').addEventListener('click', () => { binderPage++; renderBinder(); });
+  function drawBinderAdjust() {
+    const slot = binderSelected != null
+      && currentProgress.slots.find((s) => s.productId === binderSelected && s.page === binderPage);
+    $('binder-adjust').hidden = !slot;
+    $('binder-adjust-hint').hidden = !!slot;
+    if (!slot) return;
+    $('binder-adjust-who').textContent = `${slot.number || '—'} · ${slot.name}`;
+    $('binder-adjust-count').textContent = `${slot.owned}/${slot.target}`;
+    $('binder-minus').disabled = slot.owned <= 0;
+    $('binder-plus').disabled = false;
+  }
+
+  async function binderStep(delta) {
+    if (binderSelected == null) return;
+    $('binder-minus').disabled = $('binder-plus').disabled = true;  // one tap, one request
+    $('binder-adjust-error').textContent = '';
+    try {
+      await adjustOwned(binderSelected, delta);
+    } catch (err) {
+      $('binder-adjust-error').textContent = 'Not saved: ' + err.message;
+    }
+    drawBinder();
+  }
+  $('binder-minus').addEventListener('click', () => binderStep(-1));
+  $('binder-plus').addEventListener('click', () => binderStep(+1));
+
+  $('binder-prev').addEventListener('click', () => { binderPage--; binderSelected = null; renderBinder(); });
+  $('binder-next').addEventListener('click', () => { binderPage++; binderSelected = null; renderBinder(); });
 
   // ═══════════════════════ MISSING ══════════════════════════════
 
   async function renderMissing() {
-    const missing = await api('/api/goals/' + currentGoal.id + '/missing');
+    await refreshGoalProgress();
+    const missing = currentProgress.slots.filter((s) => s.owned < s.target);
     $('missing-goal-name').textContent = currentGoal.name;
-    $('missing-summary').textContent = `${missing.length} slot${missing.length === 1 ? '' : 's'} still open.`;
+    $('missing-adjust-error').textContent = '';
+    const summarize = () => {
+      const open = missing.filter((s) => s.owned < s.target).length;
+      $('missing-summary').textContent = `${open} slot${open === 1 ? '' : 's'} still open.`;
+    };
+    summarize();
     const ul = $('missing-list');
     ul.innerHTML = '';
     if (missing.length === 0) {
@@ -1401,7 +1500,31 @@
           ? `<img class="thumb" src="${esc(s.imageUrl)}" alt="" loading="lazy" decoding="async" />`
           : '<span class="thumb"></span>') +
         `<span class="who">${esc(s.number || '—')} · ${esc(s.name)}<br><span class="hint">p${s.page} · pocket ${s.pocket}</span></span>` +
-        `<span class="tag extra">${s.owned}/${s.target}</span>`;
+        `<div class="stepper"><button class="minus" aria-label="Remove one copy">−</button>` +
+        `<span class="count"></span><button class="plus" aria-label="Add one copy">+</button></div>`;
+      const minus = li.querySelector('.minus');
+      const plus = li.querySelector('.plus');
+      const draw = () => {
+        li.querySelector('.count').textContent = `${s.owned}/${s.target}`;
+        li.classList.toggle('filled', s.owned >= s.target);
+        minus.disabled = s.owned <= 0;
+        plus.disabled = false;
+      };
+      const step = async (delta) => {
+        minus.disabled = plus.disabled = true;  // one tap, one request
+        $('missing-adjust-error').textContent = '';
+        try {
+          // `s` is the same object adjustOwned updates in currentProgress, so draw() sees it.
+          await adjustOwned(s.productId, delta);
+        } catch (err) {
+          $('missing-adjust-error').textContent = 'Not saved: ' + err.message;
+        }
+        draw();
+        summarize();
+      };
+      minus.addEventListener('click', () => step(-1));
+      plus.addEventListener('click', () => step(+1));
+      draw();
       ul.appendChild(li);
     }
   }
