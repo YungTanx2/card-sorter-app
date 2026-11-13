@@ -987,6 +987,10 @@ const insertAdjustment = db.prepare(`
 export function adjustGoal(goalId: string, productId: number, delta: number, note?: string): number {
   if (!getGoal(goalId)) throw new Error(`Goal ${goalId} not found`);
   if (!Number.isInteger(delta) || delta === 0) throw new Error('delta must be a non-zero integer.');
+  // getOwnedCounts clamps the total at zero, so a decrement past zero would be stored but
+  // invisible — and silently swallow the next increment. Refuse it instead.
+  const before = getOwnedCounts(goalId).get(productId) ?? 0;
+  if (before + delta < 0) throw new Error(`Only ${before} owned — can't remove ${-delta}.`);
   insertAdjustment.run(goalId, productId, delta, note ?? null, Date.now());
   return getOwnedCounts(goalId).get(productId) ?? 0;
 }
