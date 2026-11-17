@@ -193,6 +193,7 @@
 
 <header>
   <h1>Card Sorter</h1>
+  <span id="game-switch-slot"></span>
   <nav>
     <button data-view="setup" class="active">Setup</button>
     <button data-view="calibrate">Calibrate</button>
@@ -210,8 +211,9 @@
   <section id="view-setup">
     <p class="hint">Before your first run on a new mount, open <strong>Calibrate</strong> to align the capture window to where the card actually lands in frame — recognition matches a cropped photo against each card's reference image, so a tight, consistent crop still matters even though recognition itself now runs locally (5/6 correct in the last real test).</p>
 
-    <label for="game-select">Game</label>
-    <select id="game-select"></select>
+    <!-- Driven by the Lorcana | Magic switch in the header (game.js); kept as what gets posted. -->
+    <label for="game-select" hidden>Game</label>
+    <select id="game-select" hidden></select>
 
     <label for="set-select">Sets — required, select at least one</label>
     <select id="set-select" multiple></select>
@@ -513,6 +515,7 @@
 
 </main>
 
+<script src="/game.js"></script>
 <script src="/mobile.js"></script>
 <script src="/capture.js"></script>
 <script src="/audio.js"></script>
@@ -669,7 +672,8 @@
 
   // Remembered on this phone only. localStorage can throw or come back empty (private window,
   // cleared site data), so every access is guarded and a miss means "start from the defaults".
-  const SETUP_KEY = 'cs.setup.v1';
+  // One record per game, so switching to Magic and back puts the Lorcana run back as it was.
+  const setupKey = () => GameSwitch.storageKey('cs.setup.v1');
   function remember(key, value) {
     try { localStorage.setItem(key, JSON.stringify(value)); } catch (e) { /* not remembered */ }
   }
@@ -696,7 +700,7 @@
   }
 
   async function loadSetup() {
-    applySettings(await api('/api/settings'));
+    applySettings(await api(GameSwitch.settingsUrl('/api/settings')));
     $('threshold-input').value = (appSettings.defaultThresholdCents / 100).toFixed(2);
     $('min-score-input').value = appSettings.minScore;
     $('min-gap-input').value = appSettings.minGap;
@@ -707,11 +711,39 @@
     // The snake_case spelling was a TCGTracking-era leftover that rendered every option as
     // "undefined" and stored the literal string "undefined" as the session's gameName.
     gameSelect.innerHTML = games.map((g) => `<option value="${g.id}" data-name="${g.displayName}">${g.displayName}</option>`).join('');
-    const saved = recall(SETUP_KEY);
-    if (saved && hasOption(gameSelect, saved.gameId)) gameSelect.value = String(saved.gameId);
+    gameSelect.value = String(GameSwitch.current());
     await onGameChange();
+    const saved = recall(setupKey());
     if (saved && Number(gameSelect.value) === saved.gameId) await restoreSetup(saved);
+    else await preselectDefaultSets();
   }
+
+  /** First use of a game on this phone: tick its usual set (Magic → the Zeta set) so the long
+   *  Magic set list opens on the right one instead of nothing. */
+  async function preselectDefaultSets() {
+    const wanted = new Set((GameSwitch.byId(GameSwitch.current()).defaultSetIds || []).map(String));
+    if (!wanted.size) return;
+    let any = false;
+    for (const o of $('set-select').options) if (wanted.has(o.value)) { o.selected = true; any = true; }
+    if (!any) return;
+    setPicker.render();
+    await refreshVariants();
+  }
+
+  GameSwitch.mount($('game-switch-slot'), {
+    // A run's thresholds were fixed when it started; switching would re-point everything else
+    // (settings, remembered choices) under a pile already going through the machine.
+    canSwitch: () => (session && currentViewName === 'run' ? 'Finish the run before switching games.' : null),
+    onChange: async () => {
+      $('setup-error').innerHTML = '';
+      try {
+        await loadSetup();
+        if (currentViewName === 'settings') await loadSettingsView();
+      } catch (err) {
+        $('setup-error').innerHTML = `<div class="error-box">Failed to load setup data: ${err.message}</div>`;
+      }
+    },
+  });
 
   async function onGameChange() {
     const gameId = Number($('game-select').value);
@@ -781,7 +813,7 @@
       minGap: Number($('min-gap-input').value),
       location,
     };
-    remember(SETUP_KEY, {
+    remember(setupKey(), {
       gameId: body.gameId, setIds, variant: body.variant, condition: body.condition,
       thresholdCents: body.thresholdCents, location, maxKeepers: maxKeepersInput,
     });
@@ -1122,7 +1154,7 @@
     }
     if (pendingPresenceMinDiff != null) patch.cardPresenceMinDiff = pendingPresenceMinDiff;
     try {
-      applySettings(await api('/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch) }));
+      applySettings(await api(GameSwitch.settingsUrl('/api/settings'), { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch) }));
       pendingBaseline = null;
       pendingPresenceMinDiff = null;
       $('calib-status').textContent = 'Saved — every capture will use this crop from now on.'
@@ -1469,7 +1501,7 @@
    * needs the sound to change while dragging).
    */
   const SETTINGS_FORM = [
-    { group: 'Recognition', fields: [
+    { group: 'Recognition', perGame: true, fields: [
       { key: 'minScore', label: 'Minimum match score', type: 'number', min: 0, max: 1, step: 0.01,
         help: 'Below this, the card goes to extras/bulk. Real matches usually score 0.7–0.9.' },
       { key: 'minGap', label: 'Minimum lead over runner-up', type: 'number', min: 0, max: 0.2, step: 0.005,
@@ -1481,13 +1513,13 @@
       { key: 'ocrMinSim', label: 'Title match strictness', type: 'number', min: 0.5, max: 1, step: 0.01,
         help: '0.80 has had no wrong rescues. Tighten to 0.85 at the first wrong route.' },
     ] },
-    { group: 'Run defaults', fields: [
+    { group: 'Run defaults', perGame: true, fields: [
       { key: 'defaultThresholdCents', label: 'Keeper threshold', type: 'number', unit: '$', scale: 0.01, min: 0, step: 0.01,
         help: 'Starting value on the Card Sorter setup screen.' },
       { key: 'defaultCondition', label: 'Assumed condition', type: 'select',
         options: ['Near Mint', 'Lightly Played', 'Moderately Played', 'Heavily Played', 'Damaged'] },
       { key: 'hopperEmptyTimeoutMs', label: 'Hopper empty after', type: 'number', unit: 's', scale: 0.001, min: 1, step: 1,
-        help: 'No card for this long ends the run.' },
+        help: 'No card for this long ends the run. Shared by both games.' },
     ] },
     { group: 'Sound', fields: [
       { key: 'soundEnabled', label: 'Sound cues', type: 'toggle' },
@@ -1567,7 +1599,9 @@
         : `<div class="unit-row">${input}<span class="unit">${f.unit}</span></div>`;
       return open + `<label for="${id}">${f.label}</label>${body}${help}</div>`;
     };
-    const groupHtml = (g) => `<div class="settings-group"><h2>${g.group}</h2>${g.fields.map(fieldHtml).join('')}</div>`;
+    // Groups the server keeps per game (settings.ts GAME_SCOPED_KEYS) say whose values they are.
+    const gameLabel = GameSwitch.byId(GameSwitch.current()).label;
+    const groupHtml = (g) => `<div class="settings-group"><h2>${g.group}${g.perGame ? ' · ' + gameLabel : ''}</h2>${g.fields.map(fieldHtml).join('')}</div>`;
     $('settings-form').innerHTML = SETTINGS_FORM.filter((g) => !g.advanced).map(groupHtml).join('') +
       `<details><summary>Advanced</summary>${SETTINGS_FORM.filter((g) => g.advanced).map(groupHtml).join('')}</details>`;
 
@@ -1637,7 +1671,7 @@
   $('settings-form').addEventListener('submit', (e) => e.preventDefault());
 
   async function loadSettingsView() {
-    renderSettingsForm(await api('/api/settings'));
+    renderSettingsForm(await api(GameSwitch.settingsUrl('/api/settings')));
   }
   $('settings-reload-btn').addEventListener('click', () => renderSettingsForm(settingsBase || appSettings));
 
@@ -1707,11 +1741,13 @@
   });
   $('synth-save-btn').addEventListener('click', async () => {
     try {
-      const merged = Object.assign({}, appSettings, synthValues());
-      applySettings(await api('/api/settings', {
+      // Only the four synth keys. Sending back the whole settings object would also re-save the
+      // loaded game's thresholds, which is harmless today but is how one game's values end up
+      // written over another's.
+      applySettings(await api(GameSwitch.settingsUrl('/api/settings'), {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(merged),
+        body: JSON.stringify(synthValues()),
       }));
       // The machine holds templates, not settings. Saving a cue the X1PRO has not been taught is
       // exactly how a run sorts backwards, so say so every time rather than trusting memory.
@@ -1727,7 +1763,7 @@
     if (errors.length) { $('settings-status').textContent = 'Fix first: ' + errors.join('; '); return; }
     if (!Object.keys(patch).length) { $('settings-status').textContent = 'Nothing to save.'; return; }
     try {
-      applySettings(await api('/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch) }));
+      applySettings(await api(GameSwitch.settingsUrl('/api/settings'), { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch) }));
       renderSettingsForm(appSettings);
       const n = Object.keys(patch).length;
       $('settings-status').textContent = `Saved ${n} change${n === 1 ? '' : 's'}.`

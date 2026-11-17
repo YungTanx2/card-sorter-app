@@ -215,7 +215,15 @@ function hasPrintingFor(row: CatalogRow, variant: string): boolean {
     return true; // unparseable price blob — same "don't know" rule as no data at all
   }
   if (prices.length === 0) return true;
-  return prices.some((p) => p.subTypeName === variant && p.marketPrice != null && Number.isFinite(p.marketPrice));
+  // A listing price counts as evidence the printing exists, not just a market price. TCGPlayer
+  // only computes a market price once a printing has SOLD, so a new set is full of cards that are
+  // listed but unsold: on Magic's Zeta set (2 months old) 162 of 373 Normal rows had a low price
+  // and a null market price — e.g. All That Glitters 0122, $28.51 low — and requiring a market
+  // price dropped every one of them from the pool, where no capture could ever match them.
+  // Measured on the Lorcana cache: this adds zero products to either the Normal or Cold Foil pool,
+  // so the foil-twin filtering above is unchanged.
+  const finite = (n: number | null | undefined) => n != null && Number.isFinite(n);
+  return prices.some((p) => p.subTypeName === variant && (finite(p.marketPrice) || finite(p.lowPrice)));
 }
 
 /**

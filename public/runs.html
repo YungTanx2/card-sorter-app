@@ -104,6 +104,7 @@
 
 <header>
   <h1>Run History</h1>
+  <span id="game-switch-slot"></span>
   <nav>
     <a class="nav-link" href="/sets.html">Set Builder</a>
     <a class="nav-link" href="/">Sorter</a>
@@ -123,6 +124,7 @@
   <div id="list"></div>
 </main>
 
+<script src="/game.js"></script>
 <script>
 (function () {
   'use strict';
@@ -159,7 +161,14 @@
     return sameDay ? 'Today ' + time : d.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ' ' + time;
   }
 
+  // Runs of the game picked in the header switch; games without a switch position list under
+  // Lorcana, matching how Set Builder lists goals.
+  function inCurrentGame(run) {
+    return GameSwitch.current() === 1 ? run.gameId === 1 : run.gameId !== 1;
+  }
+
   function matches(run) {
+    if (!inCurrentGame(run)) return false;
     if (filter === 'all') return true;
     if (filter === 'review') return run.reviewable > 0;
     return run.kind === filter;
@@ -350,7 +359,8 @@
     if (shown.length === 0) {
       var e = document.createElement('div');
       e.className = 'empty';
-      e.textContent = runs.length === 0 ? 'No runs yet.' : 'No runs match this filter.';
+      var gameRuns = runs.filter(inCurrentGame).length;
+      e.textContent = gameRuns === 0 ? 'No ' + GameSwitch.byId(GameSwitch.current()).label + ' runs yet.' : 'No runs match this filter.';
       list.appendChild(e);
       return;
     }
@@ -380,6 +390,10 @@
     confirming = confirming === run.id ? null : run.id;
     render();
   }
+
+  GameSwitch.mount($('game-switch-slot'), {
+    onChange: function () { confirming = null; render(); },
+  });
 
   load();
 })();

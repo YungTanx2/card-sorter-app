@@ -218,13 +218,32 @@ async function detectCard(buf: Buffer): Promise<Box | null> {
   return box;
 }
 
-/** Fractional bands within the detected card. Lorcana puts the name on a stable line with the
- *  subtitle directly beneath; both are read and joined, because "MULAN" alone is ambiguous
- *  against every other Mulan printing while "MULAN CREATED BY THE VINE" is not. */
-const BANDS = {
-  name: { x: 0.05, y: 0.540, w: 0.72, h: 0.055 },
-  sub:  { x: 0.05, y: 0.585, w: 0.72, h: 0.042 },
-};
+/** A fractional region of the detected card, plus the upscale Tesseract reads it at. */
+export interface TitleBand { x: number; y: number; w: number; h: number; scale: number }
+
+/** Lorcana puts the name on a stable line with the subtitle directly beneath; both are read and
+ *  joined, because "MULAN" alone is ambiguous against every other Mulan printing while
+ *  "MULAN CREATED BY THE VINE" is not. */
+const LORCANA_BANDS: TitleBand[] = [
+  { x: 0.05, y: 0.540, w: 0.72, h: 0.055, scale: 4 },
+  { x: 0.05, y: 0.585, w: 0.72, h: 0.042, scale: 5 },
+];
+
+/** Magic prints the name along the TOP edge, with the mana cost at the right end of the same line
+ *  (stopped short of it with w, since "G" or "2UU" is only junk to the matcher). Measured on the
+ *  Zeta set's reference art, where the name sits at 4.5-9.8% of card height and 5-81% of width;
+ *  the band is padded around that for placement drift. Standard Magic frames put the name in the
+ *  same strip, so this is not Zeta-specific. The type line under it carries no identity, so a
+ *  single band is read. */
+const MAGIC_BANDS: TitleBand[] = [
+  { x: 0.04, y: 0.03, w: 0.78, h: 0.085, scale: 3 },
+];
+
+/** Where the printed name is, per TCGCSV categoryId. Games without an entry keep the Lorcana
+ *  layout they always had. */
+export function titleBandsFor(gameId: number): TitleBand[] {
+  return gameId === 1 ? MAGIC_BANDS : LORCANA_BANDS;
+}
 
 function bandBox(card: Box, b: { x: number; y: number; w: number; h: number }, fw: number, fh: number): Box {
   const left = Math.max(0, Math.min(fw - 8, Math.round(card.left + b.x * card.width)));
@@ -237,7 +256,19 @@ function bandBox(card: Box, b: { x: number; y: number; w: number; h: number }, f
 }
 
 export interface OcrTitleMatch {
+  /** The first product carrying the matched title. Only an identification when productIds has
+   *  exactly one entry; otherwise it is just a representative for logging. */
   productId: number;
+  /**
+   * EVERY product in the pool printed with the matched title.
+   *
+   * Usually one: a variant-scoped Lorcana pool has unique titles (see the header). Magic breaks
+   * that. The Zeta set prints each card three times with the same name — white (0001-0121), black
+   * (0122-0242) and a CMYK "misprint" (0243+) — and the treatment is most of the price (Urborg
+   * 0242 $240 vs 0121 $81). A title read can only ever narrow to the name; which printing it is
+   * belongs to the embedding. fuseSignals() does that split.
+   */
+  productIds: number[];
   /** Approximate-substring similarity in [0, 1] against the resolved title. */
   sim: number;
   /** Gap to the next-best DISTINCT title — near-zero means two catalog titles fit equally well. */
@@ -255,8 +286,9 @@ export interface OcrTitleMatch {
 export async function readCardTitle(
   imageBuffer: Buffer,
   candidates: CandidateCard[],
-  opts: { minTitleChars: number },
+  opts: { minTitleChars: number; bands?: TitleBand[] },
 ): Promise<OcrTitleMatch | null> {
+  const bands = opts.bands ?? LORCANA_BANDS;
   if (candidates.length === 0) return null;
   try {
     const meta = await sharp(imageBuffer).metadata();
@@ -279,26 +311,24 @@ export async function readCardTitle(
     if (index.size === 0) return null;
 
     const worker = await getWorker();
-    const render = async (b: { x: number; y: number; w: number; h: number }, scale: number, invert: boolean): Promise<Buffer> => {
+    const render = async (b: TitleBand, invert: boolean): Promise<Buffer> => {
       const box = bandBox(card, b, fw, fh);
       let p = sharp(imageBuffer).extract(box).greyscale()
-        .resize({ width: Math.round(box.width * scale), kernel: 'lanczos3' }).normalise();
+        .resize({ width: Math.round(box.width * b.scale), kernel: 'lanczos3' }).normalise();
       if (invert) p = p.negate();
       return p.png().toBuffer();
     };
 
     let best: OcrTitleMatch | null = null;
-    // Lorcana name bars run light-on-dark AND dark-on-light depending on the ink colour, and
-    // Tesseract is markedly better on dark-on-light, so both polarities are tried and the better
-    // resolution kept. Two extra recognize() calls cost ~120ms against a 4.2s machine cycle.
+    // Name bars run light-on-dark AND dark-on-light (Lorcana by ink colour, Zeta by treatment —
+    // its black printings are white-on-black), and Tesseract is markedly better on dark-on-light,
+    // so both polarities are tried and the better resolution kept. Two extra recognize() calls
+    // cost ~120ms against a 4.2s machine cycle.
     for (const invert of [true, false]) {
-      const [nameBuf, subBuf] = await Promise.all([
-        render(BANDS.name, 4, invert),
-        render(BANDS.sub, 5, invert),
-      ]);
-      const t1 = (await worker.recognize(nameBuf, {}, { text: true })).data.text ?? '';
-      const t2 = (await worker.recognize(subBuf, {}, { text: true })).data.text ?? '';
-      const raw = `${t1} ${t2}`.replace(/\s+/g, ' ').trim();
+      const bufs = await Promise.all(bands.map((b) => render(b, invert)));
+      const texts: string[] = [];
+      for (const buf of bufs) texts.push((await worker.recognize(buf, {}, { text: true })).data.text ?? '');
+      const raw = texts.join(' ').replace(/\s+/g, ' ').trim();
       const q = normalizeTitle(raw);
       if (q.length < opts.minTitleChars) continue;
 
@@ -311,7 +341,7 @@ export async function readCardTitle(
       const ids = index.get(topKey);
       if (!ids || ids.length === 0) continue;
       if (!best || topSim > best.sim) {
-        best = { productId: ids[0], sim: topSim, margin: topSim - Math.max(secondSim, 0), raw };
+        best = { productId: ids[0], productIds: ids, sim: topSim, margin: topSim - Math.max(secondSim, 0), raw };
       }
     }
     return best;
@@ -359,20 +389,49 @@ export function fuseSignals(args: {
   minScore: number;
   minGap: number;
   ocrMinSim: number;
+  /** The embedding's full ranking. Needed only when a title has several printings, to choose
+   *  between them; without it such a read cannot identify a card on its own. */
+  scored?: EmbeddingMatch[];
 }): FusedMatch {
-  const { top, runnerUp, ocr, minScore, minGap, ocrMinSim } = args;
+  const { top, runnerUp, ocr, minScore, minGap, ocrMinSim, scored } = args;
   const clipConfident = !!top
     && top.score >= minScore
     && (!runnerUp || top.score - runnerUp.score >= minGap);
   const ocrConfident = !!ocr && ocr.sim >= ocrMinSim;
 
   if (clipConfident && ocrConfident) {
-    if (top!.productId !== ocr!.productId) {
+    // Agreement means the embedding's card carries the title OCR read. With one printing per
+    // title (every Lorcana pool) that is exactly the old productId equality.
+    if (!ocr!.productIds.includes(top!.productId)) {
       return { productId: null, source: null, conflict: true, clipConfident, ocrConfident };
     }
     return { productId: top!.productId, source: 'both', conflict: false, clipConfident, ocrConfident };
   }
   if (clipConfident) return { productId: top!.productId, source: 'clip', conflict: false, clipConfident, ocrConfident };
-  if (ocrConfident) return { productId: ocr!.productId, source: 'ocr', conflict: false, clipConfident, ocrConfident };
+  if (ocrConfident) {
+    const id = resolvePrinting(ocr!.productIds, scored, minGap);
+    if (id != null) return { productId: id, source: 'ocr', conflict: false, clipConfident, ocrConfident };
+  }
   return { productId: null, source: null, conflict: false, clipConfident, ocrConfident };
+}
+
+/**
+ * Which of a title's printings this is, when OCR has read the name but the embedding was not
+ * confident across the whole pool.
+ *
+ * The two questions are different on purpose. Across the pool, the embedding fails on SIBLINGS —
+ * 121 cream-and-ink Zeta cards look alike to a global descriptor. Among one title's printings it
+ * only has to tell white from black from a CMYK misprint, which is the easiest thing a colour
+ * embedding can be asked. So the printings are ranked by the same scores, and the best must lead
+ * the next printing of the SAME title by minGap. A tie stays unidentified and fails safe: the
+ * treatment is the price, and guessing it is how a $240 card goes to bulk.
+ */
+export function resolvePrinting(productIds: number[], scored: EmbeddingMatch[] | undefined, minGap: number): number | null {
+  if (productIds.length === 1) return productIds[0];
+  if (!scored) return null;
+  const wanted = new Set(productIds);
+  const ranked = scored.filter((m) => wanted.has(m.productId));
+  if (ranked.length === 0) return null;
+  if (ranked.length > 1 && ranked[0].score - ranked[1].score < minGap) return null;
+  return ranked[0].productId;
 }

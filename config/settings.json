@@ -39,6 +39,19 @@
   "synthAcceptGain": 0.42,
   "synthRejectHz": 392,
   "synthRejectGain": 0.5,
+  "gameOverrides": {
+    "1": {
+      "minScore": 0.65,
+      "minGap": 0.025,
+      "minCardScore": 0.6,
+      "ocrEnabled": true,
+      "ocrMinSim": 0.8,
+      "ocrMinTitleChars": 6,
+      "straightenEnabled": false,
+      "defaultThresholdCents": 100,
+      "defaultCondition": "Near Mint"
+    }
+  },
   "csvColumns": [
     {
       "header": "TCGplayer Id",

@@ -264,6 +264,7 @@
 
 <header>
   <h1>Set Builder</h1>
+  <span id="game-switch-slot"></span>
   <nav>
     <button data-view="goals" class="active">Goals</button>
     <button data-view="new">New</button>
@@ -295,8 +296,9 @@
     <label for="goal-name">Name</label>
     <input type="text" id="goal-name" placeholder="e.g. Attack of the Vine! master set" />
 
-    <label for="game-select">Game</label>
-    <select id="game-select"></select>
+    <!-- Driven by the Lorcana | Magic switch in the header (game.js); kept as what gets posted. -->
+    <label for="game-select" hidden>Game</label>
+    <select id="game-select" hidden></select>
 
     <label for="set-select">Set(s) — required</label>
     <select id="set-select" multiple></select>
@@ -484,6 +486,7 @@
 
 </main>
 
+<script src="/game.js"></script>
 <script src="/mobile.js"></script>
 <script src="/capture.js"></script>
 <script src="/audio.js"></script>
@@ -498,7 +501,7 @@
   const audio = window.CardSorterAudio;
 
   MobileUI.collapseHints();
-  MobileUI.checkboxPicker(document.getElementById('set-select'), { noun: ['set', 'sets'] });
+  const setPicker = MobileUI.checkboxPicker(document.getElementById('set-select'), { noun: ['set', 'sets'] });
   MobileUI.checkboxPicker(document.getElementById('rarity-select'), { noun: ['excluded', 'excluded'] });
   const { X1ProRunDriver, ROUTE, connectControl } = window.X1ProRun;
 
@@ -509,7 +512,8 @@
   // localStorage can throw or come back empty (private window, cleared site data), so every
   // access is guarded and a miss just means "start from the defaults", exactly as before.
   const RUN_OPTS_KEY = 'sb.run.v1';
-  const LAST_GOAL_KEY = 'sb.lastGoal.v1';
+  // Per game: switching to Magic reopens the last Magic goal, and back again the Lorcana one.
+  const lastGoalKey = () => GameSwitch.storageKey('sb.lastGoal.v1');
   function remember(key, value) {
     try { localStorage.setItem(key, JSON.stringify(value)); } catch (e) { /* not remembered */ }
   }
@@ -565,10 +569,16 @@
 
   // ═══════════════════════ GOALS LIST ═══════════════════════════
 
+  /** Goals for the game picked in the header. Games without their own switch position (Pokemon
+   *  etc., none in use) list under Lorcana, the same way they share Lorcana's settings. */
+  const MAGIC = 1;
+  const inCurrentGame = (g) => (GameSwitch.current() === MAGIC ? g.gameId === MAGIC : g.gameId !== MAGIC);
+
   async function loadGoals() {
-    goals = await api('/api/goals');
+    goals = (await api('/api/goals')).filter(inCurrentGame);
     const list = $('goal-list');
     $('goals-empty').hidden = goals.length > 0;
+    $('goals-empty').innerHTML = `No ${esc(GameSwitch.byId(GameSwitch.current()).label)} goals yet — create one under <strong>New</strong>.`;
     list.innerHTML = '';
 
     for (const g of goals) {
@@ -592,7 +602,7 @@
 
   async function selectGoal(goal) {
     currentGoal = goal;
-    remember(LAST_GOAL_KEY, goal.id);
+    remember(lastGoalKey(), goal.id);
     currentProgress = await api('/api/goals/' + goal.id + '/progress');
     liveFilled = currentProgress.filledSlots;
     binderPage = 1;
@@ -608,9 +618,30 @@
     if (newFormLoaded) return;
     const games = await api('/api/games');
     $('game-select').innerHTML = games.map((g) => `<option value="${g.id}" data-name="${esc(g.displayName)}">${esc(g.displayName)}</option>`).join('');
+    $('game-select').value = String(GameSwitch.current());
     await onGameChange();
+    // First thing a new Magic goal will be is the Zeta set; ticking it saves scrolling ~450 sets.
+    const wanted = new Set((GameSwitch.byId(GameSwitch.current()).defaultSetIds || []).map(String));
+    let any = false;
+    for (const o of $('set-select').options) if (wanted.has(o.value)) { o.selected = true; any = true; }
+    if (any) { setPicker.render(); await refreshSetVocab(); }
     newFormLoaded = true;
   }
+
+  GameSwitch.mount($('game-switch-slot'), {
+    canSwitch: () => (goalSession && currentViewName === 'run' && rig ? 'Finish the run before switching games.' : null),
+    onChange: async () => {
+      // Everything below the list is scoped to one goal, which now belongs to the other game.
+      currentGoal = null;
+      newFormLoaded = false;
+      showView('goals');
+      try {
+        await loadGoals();
+      } catch (err) {
+        $('goal-list').innerHTML = `<li class="error-box">Failed to load: ${esc(err.message)}</li>`;
+      }
+    },
+  });
 
   async function onGameChange() {
     const gameId = Number($('game-select').value);
@@ -1550,7 +1581,7 @@
 
   (async function boot() {
     try {
-      appSettings = await api('/api/settings');
+      appSettings = await api(GameSwitch.settingsUrl('/api/settings'));
       // This page has no settings editor — it reads once at boot. Changes are made on the
       // price-sorter page's Settings view (linked in the nav) and picked up here on next load.
       audio.configure(appSettings);
@@ -1567,7 +1598,7 @@
       await loadGoals();
       // Reopen the goal last worked on, straight onto its run setup. A deleted goal just isn't
       // found, and the list stays up.
-      const lastGoal = goals.find((g) => g.id === recall(LAST_GOAL_KEY));
+      const lastGoal = goals.find((g) => g.id === recall(lastGoalKey()));
       if (lastGoal) {
         try { await selectGoal(lastGoal); } catch (err) { console.warn('[sets] reopening last goal failed:', err); showView('goals'); }
       }

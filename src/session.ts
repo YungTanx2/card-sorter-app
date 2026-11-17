@@ -2,12 +2,12 @@ import crypto from 'crypto';
 import { db } from './db';
 import { StallError } from './errors';
 import { getProductCached } from './tcgtracking';
-import { matchCard, prewarmEmbeddings } from './embeddings';
+import { scoreCandidates, prewarmEmbeddings } from './embeddings';
 import { straightenCard } from './straighten';
-import { readCardTitle, fuseSignals, OcrTitleMatch } from './ocr';
+import { readCardTitle, fuseSignals, OcrTitleMatch, titleBandsFor } from './ocr';
 import { getSettings } from './settings';
 import { fetchSets, getCandidatesForSets, getPricesForProduct, prewarmSet } from './tcgcsv';
-import { BulkBox, CardRecord, Decision, DecisionReason, MatchSource, Session, SessionConfig, SessionStatus, TCGCSVPrice } from './types';
+import { BulkBox, CardRecord, Decision, DecisionReason, EmbeddingMatch, MatchSource, Session, SessionConfig, SessionStatus, TCGCSVPrice } from './types';
 
 /** Re-exported from errors.ts, where it moved so Set Builder's scan pipeline can throw the same
  *  type. In THIS pipeline it covers a narrow surface: matching is local (embeddings.ts, no
@@ -223,6 +223,14 @@ function resolvePriceCents(prices: TCGCSVPrice[], variant: string): number | nul
   if (exact?.marketPrice != null && Number.isFinite(exact.marketPrice)) {
     return Math.round(exact.marketPrice * 100);
   }
+  // Listed but never sold: TCGPlayer has no market price yet, only the lowest asking price. Common
+  // on a new set (162 of Zeta's 373 cards). The lowest ask is the conservative stand-in — it is
+  // what the card would actually have to compete with — and the alternative, null, sends a $28
+  // card to bulk as unpriceable. Ahead of the any-printing fallback below, because the run's own
+  // printing is the better evidence.
+  if (exact?.lowPrice != null && Number.isFinite(exact.lowPrice)) {
+    return Math.round(exact.lowPrice * 100);
+  }
 
   const anyPrice = prices
     .map((p) => p.marketPrice)
@@ -270,8 +278,9 @@ export async function scanCard(sessionId: string, imageBuffer: Buffer): Promise<
   const session = getSession(sessionId);
   if (!session) throw new Error(`Session ${sessionId} not found`);
 
-  const settings = getSettings();
+  const settings = getSettings(session.gameId);
   let top, runnerUp, candidates;
+  let scored: EmbeddingMatch[] = [];
   let ocr: OcrTitleMatch | null = null;
   try {
     // Scoped to the session's printing — a product with no price in this variant is not a
@@ -283,13 +292,14 @@ export async function scanCard(sessionId: string, imageBuffer: Buffer): Promise<
     const [match, ocrResult] = await Promise.all([
       // OCR keeps the original capture: its own detectCard() finds the title band in it.
       (settings.straightenEnabled ? straightenCard(imageBuffer).then((s) => s.image) : Promise.resolve(imageBuffer))
-        .then((buf) => matchCard(buf, scoped)),
+        .then((buf) => scoreCandidates(buf, scoped)),
       settings.ocrEnabled
-        ? readCardTitle(imageBuffer, candidates, { minTitleChars: settings.ocrMinTitleChars })
+        ? readCardTitle(imageBuffer, candidates, { minTitleChars: settings.ocrMinTitleChars, bands: titleBandsFor(session.gameId) })
         : Promise.resolve(null),
     ]);
-    top = match.top;
-    runnerUp = match.runnerUp;
+    scored = match;
+    top = match[0] ?? null;
+    runnerUp = match[1] ?? null;
     ocr = ocrResult;
   } catch (err) {
     updateSessionStatus.run('stalled', Date.now(), sessionId);
@@ -323,7 +333,7 @@ export async function scanCard(sessionId: string, imageBuffer: Buffer): Promise<
   // tunes its own gate) but the global ocrMinSim, which is a property of the reader, not the run.
   const fused = fuseSignals({
     top, runnerUp, ocr,
-    minScore: session.minScore, minGap: session.minGap, ocrMinSim: settings.ocrMinSim,
+    minScore: session.minScore, minGap: session.minGap, ocrMinSim: settings.ocrMinSim, scored,
   });
 
   if (!top && !fused.ocrConfident) {
