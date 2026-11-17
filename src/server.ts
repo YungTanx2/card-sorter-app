@@ -7,7 +7,7 @@ import { fetchCategories, fetchSets, fetchVariants, fetchRarities, getCandidates
 import { scoreCandidates } from './embeddings';
 import { straightenCard } from './straighten';
 import sharp from 'sharp';
-import { getSettings, updateSettings, validateSettingsPatch } from './settings';
+import { getSettings, getPublicSettings, updateSettings, validateSettingsPatch } from './settings';
 import { StallError } from './errors';
 import {
   createSession, getSession, resumeSession, completeSession,
@@ -118,7 +118,8 @@ app.get('/api/variants', async (req, res) => {
 
 app.post('/api/session', async (req, res) => {
   const b = req.body ?? {};
-  const settings = getSettings();
+  // The game's own thresholds and defaults, not Lorcana's, when the body leaves them out.
+  const settings = getSettings(Number(b.gameId) || null);
   const setIds = Array.isArray(b.setIds) ? b.setIds.map(Number) : [];
   if (!b.gameId || !b.gameName || !b.variant || !b.location) {
     res.status(400).json({ error: 'Body requires gameId, gameName, variant, location.' });
@@ -487,7 +488,7 @@ app.get('/api/capture-sample/:id/candidates', async (req, res) => {
     const cropped = await sharp(ctx.frame).extract(rect).resize({ width: w, height: h }).toBuffer();
 
     const candidates = getCandidatesForSets(ctx.goal.setIds, ctx.goal.variant);
-    const scored = await scoreCandidates(getSettings().straightenEnabled ? (await straightenCard(cropped)).image : cropped, candidates);
+    const scored = await scoreCandidates(getSettings(ctx.goal.gameId).straightenEnabled ? (await straightenCard(cropped)).image : cropped, candidates);
     const byId = new Map(candidates.map((c) => [c.productId, c]));
 
     res.json({
@@ -601,6 +602,7 @@ app.get('/api/runs', (_req, res) => {
   const price = listSessionSummaries().map((s) => ({
     kind: 'price' as const,
     id: s.session.id,
+    gameId: s.session.gameId,
     title: s.session.gameName + ' · ' + s.session.variant + ' · ' + s.session.condition,
     status: s.session.status,
     dryRun: false,
@@ -622,6 +624,7 @@ app.get('/api/runs', (_req, res) => {
   const builder = listAllGoalSessionSummaries().map((s) => ({
     kind: 'set-builder' as const,
     id: s.session.id,
+    gameId: s.gameId,
     title: s.goalName + ' · ' + s.gameName,
     status: s.session.status,
     dryRun: s.session.dryRun,
@@ -677,14 +680,23 @@ app.get('/api/goal-session/:id/low-confidence', (req, res) => {
   res.json(getLowConfidenceReview(req.params.id));
 });
 
-app.get('/api/settings', (_req, res) => {
-  res.json(getSettings());
+/** ?game_id= picks whose recognition values and run defaults are read or written (see
+ *  settings.ts GAME_SCOPED_KEYS). Without it, the shared values — which are Lorcana's. */
+function settingsGameId(req: express.Request): number | null {
+  const g = Number(req.query.game_id);
+  return Number.isInteger(g) && g > 0 ? g : null;
+}
+
+app.get('/api/settings', (req, res) => {
+  res.json(getPublicSettings(settingsGameId(req)));
 });
 
 app.put('/api/settings', (req, res) => {
   const error = validateSettingsPatch(req.body ?? {});
   if (error) { res.status(400).json({ error }); return; }
-  res.json(updateSettings(req.body));
+  const gameId = settingsGameId(req);
+  updateSettings(req.body, gameId);
+  res.json(getPublicSettings(gameId));
 });
 
 const server = app.listen(PORT, () => {

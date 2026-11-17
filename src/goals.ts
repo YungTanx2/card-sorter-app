@@ -2,14 +2,14 @@ import crypto from 'crypto';
 import sharp from 'sharp';
 import { db } from './db';
 import { StallError } from './errors';
-import { matchCard, prewarmEmbeddings } from './embeddings';
+import { scoreCandidates, prewarmEmbeddings } from './embeddings';
 import { straightenCard } from './straighten';
-import { readCardTitle, fuseSignals, OcrTitleMatch } from './ocr';
+import { readCardTitle, fuseSignals, OcrTitleMatch, titleBandsFor } from './ocr';
 import { getSettings } from './settings';
 import { fetchSets, getCandidatesForSets, prewarmSet, fetchSetCandidates } from './tcgcsv';
 import { assignSlots, parseCardNumber, compareCardNumbers } from './ordering';
 import {
-  CandidateCard, Goal, GoalCard, GoalConfig, GoalOutcome, GoalReason, GoalSession, GoalSlot,
+  CandidateCard, EmbeddingMatch, Goal, GoalCard, GoalConfig, GoalOutcome, GoalReason, GoalSession, GoalSlot,
   MatchSource, SessionStatus,
 } from './types';
 
@@ -352,6 +352,7 @@ export interface GoalSessionSummary {
   session: GoalSession;
   goalName: string;
   gameName: string;
+  gameId: number;
   /** Scans recorded, split by what the run actually did with them. */
   total: number;
   accepted: number;
@@ -370,17 +371,15 @@ export interface GoalSessionSummary {
  * cheap because they run against a single session.
  */
 export function listAllGoalSessionSummaries(): GoalSessionSummary[] {
-  const minScore = getSettings().minScore;
   const rows = db.prepare(`
-    SELECT s.*, g.name AS goal_name, g.game_name AS game_name
+    SELECT s.*, g.name AS goal_name, g.game_name AS game_name, g.game_id AS game_id
       FROM goal_sessions s JOIN goals g ON g.id = s.goal_id
      ORDER BY s.created_at DESC
-  `).all() as (GoalSessionRow & { goal_name: string; game_name: string })[];
+  `).all() as (GoalSessionRow & { goal_name: string; game_name: string; game_id: number })[];
 
-  const tally = (sql: string, params: unknown[] = []) => {
-    const m = new Map<string, number>();
-    for (const r of db.prepare(sql).all(...params) as { k: string; n: number }[]) m.set(r.k, r.n);
-    return m;
+  const tally = (sql: string, params: unknown[] = [], into = new Map<string, number>()) => {
+    for (const r of db.prepare(sql).all(...params) as { k: string; n: number }[]) into.set(r.k, r.n);
+    return into;
   };
   const total = tally('SELECT goal_session_id AS k, COUNT(*) AS n FROM goal_cards GROUP BY k');
   const accepted = tally("SELECT goal_session_id AS k, COUNT(*) AS n FROM goal_cards WHERE outcome = 'needed' AND voided = 0 GROUP BY k");
@@ -388,10 +387,16 @@ export function listAllGoalSessionSummaries(): GoalSessionSummary[] {
   // Same OR condition as isReviewableLowConfidence, expressed in SQL so the history page does not
   // have to load every card row just to count them. Kept adjacent to that function on purpose —
   // if one changes the other must too.
-  const reviewable = tally(
-    `SELECT goal_session_id AS k, COUNT(*) AS n FROM goal_cards
-      WHERE reason = 'low-confidence' AND voided = 0 AND (score >= ? OR runner_up_score >= ?)
-      GROUP BY k`, [minScore, minScore]);
+  // Once per game, since each game has its own minScore (settings.ts GAME_SCOPED_KEYS).
+  const reviewable = new Map<string, number>();
+  for (const gameId of new Set(rows.map((r) => r.game_id))) {
+    const minScore = getSettings(gameId).minScore;
+    tally(
+      `SELECT c.goal_session_id AS k, COUNT(*) AS n FROM goal_cards c JOIN goals g ON g.id = c.goal_id
+        WHERE g.game_id = ? AND c.reason = 'low-confidence' AND c.voided = 0
+          AND (c.score >= ? OR c.runner_up_score >= ?)
+        GROUP BY k`, [gameId, minScore, minScore], reviewable);
+  }
   const samples = tally(`SELECT c.goal_session_id AS k, COUNT(*) AS n
       FROM capture_samples s JOIN goal_cards c ON c.id = s.goal_card_id GROUP BY k`);
 
@@ -399,6 +404,7 @@ export function listAllGoalSessionSummaries(): GoalSessionSummary[] {
     session: toGoalSession(r),
     goalName: r.goal_name,
     gameName: r.game_name,
+    gameId: r.game_id,
     total: total.get(r.id) ?? 0,
     accepted: accepted.get(r.id) ?? 0,
     lowConfidence: lowConf.get(r.id) ?? 0,
@@ -556,8 +562,9 @@ export async function scanGoalCard(goalSessionId: string, imageBuffer: Buffer): 
   const goal = getGoal(session.goalId);
   if (!goal) throw new Error(`Goal ${session.goalId} not found`);
 
-  const settings = getSettings();
+  const settings = getSettings(goal.gameId);
   let top, runnerUp, candidates: CandidateCard[];
+  let scored: EmbeddingMatch[] = [];
   let ocr: OcrTitleMatch | null = null;
   try {
     // Scoped to the goal's printing — a goal is already single-variant by construction, so a
@@ -571,13 +578,14 @@ export async function scanGoalCard(goalSessionId: string, imageBuffer: Buffer): 
     const [match, ocrResult] = await Promise.all([
       // OCR keeps the original capture: its own detectCard() finds the title band in it.
       (settings.straightenEnabled ? straightenCard(imageBuffer).then((s) => s.image) : Promise.resolve(imageBuffer))
-        .then((buf) => matchCard(buf, candidates)),
+        .then((buf) => scoreCandidates(buf, candidates)),
       settings.ocrEnabled
-        ? readCardTitle(imageBuffer, candidates, { minTitleChars: settings.ocrMinTitleChars })
+        ? readCardTitle(imageBuffer, candidates, { minTitleChars: settings.ocrMinTitleChars, bands: titleBandsFor(goal.gameId) })
         : Promise.resolve(null),
     ]);
-    top = match.top;
-    runnerUp = match.runnerUp;
+    scored = match;
+    top = match[0] ?? null;
+    runnerUp = match[1] ?? null;
     ocr = ocrResult;
   } catch (err) {
     updateGoalSessionStatus.run('stalled', Date.now(), goalSessionId);
@@ -632,7 +640,7 @@ export async function scanGoalCard(goalSessionId: string, imageBuffer: Buffer): 
   // both, or neither is confident, and flags the case where they disagree. See ocr.ts.
   const fused = fuseSignals({
     top, runnerUp, ocr,
-    minScore: settings.minScore, minGap: settings.minGap, ocrMinSim: settings.ocrMinSim,
+    minScore: settings.minScore, minGap: settings.minGap, ocrMinSim: settings.ocrMinSim, scored,
   });
 
   // 0. Server-side backstop for phantom captures — see AppSettings.minCardScore's doc and
@@ -917,7 +925,7 @@ export function getLowConfidenceReview(goalSessionId: string): LowConfidenceEntr
   const session = getGoalSession(goalSessionId);
   if (!session) throw new Error(`Goal session ${goalSessionId} not found`);
   const goal = getGoal(session.goalId)!;
-  const minScore = getSettings().minScore;
+  const minScore = getSettings(goal.gameId).minScore;
   // Unscoped for the same reason as getReviewStrip: this resolves historical rows, and narrowing
   // by the current variant would blank the image of the very rows worth reviewing.
   const byId = new Map(getCandidatesForSets(goal.setIds).map((c) => [c.productId, c]));

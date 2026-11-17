@@ -21,7 +21,9 @@ function eq(name, actual, expected) {
 
 const S = { minScore: 0.65, minGap: 0.02, ocrMinSim: 0.80 };
 const clip = (productId, score) => ({ productId, score });
-const ocrOf = (productId, sim) => ({ productId, sim, margin: 0.3, raw: 'RAW' });
+const ocrOf = (productId, sim) => ({ productId, productIds: [productId], sim, margin: 0.3, raw: 'RAW' });
+/** A title printed several times (Zeta: white / black / misprint share one name). */
+const ocrTitle = (productIds, sim) => ({ productId: productIds[0], productIds, sim, margin: 0.3, raw: 'RAW' });
 
 console.log('\nfuseSignals — both signals confident');
 {
@@ -81,11 +83,51 @@ console.log('\nfuseSignals — thresholds');
   eq('...and that is not a conflict', f.conflict, false);
 }
 
+console.log('\nfuseSignals — one title, several printings (Magic Zeta)');
+// Urborg: 121 white ($81), 242 black ($240), 363 misprint. OCR reads the name; it cannot see the
+// treatment, so CLIP's scores among those three decide which one it is.
+const URBORG = [121, 242, 363];
+{
+  // The regression this guards: the first printing used to stand in for the title, so a correct
+  // CLIP match on the black copy disagreed with OCR's "white copy" and went to bulk as a conflict.
+  const f = fuseSignals({ top: clip(242, 0.90), runnerUp: clip(121, 0.80), ocr: ocrTitle(URBORG, 0.95), ...S });
+  eq('CLIP on a non-first printing AGREES with the title, no conflict', f.conflict, false);
+  eq('...and keeps the printing CLIP chose', f.productId, 242);
+  eq('...sourced as both', f.source, 'both');
+}
+{
+  const f = fuseSignals({ top: clip(500, 0.90), runnerUp: clip(242, 0.80), ocr: ocrTitle(URBORG, 0.95), ...S });
+  eq('CLIP on a card OUTSIDE the title is still a conflict', f.conflict, true);
+}
+{
+  // The rescue: CLIP is torn between two sibling white cards (gap 0.003), but among Urborg's own
+  // printings the black copy clearly leads.
+  const scored = [clip(77, 0.812), clip(242, 0.809), clip(121, 0.70), clip(363, 0.66)];
+  const f = fuseSignals({ top: scored[0], runnerUp: scored[1], ocr: ocrTitle(URBORG, 0.9), scored, ...S });
+  eq('OCR name + CLIP treatment identifies the printing', f.productId, 242);
+  eq('...sourced as ocr', f.source, 'ocr');
+}
+{
+  const scored = [clip(77, 0.812), clip(242, 0.809), clip(121, 0.80), clip(363, 0.66)];
+  const f = fuseSignals({ top: scored[0], runnerUp: scored[1], ocr: ocrTitle(URBORG, 0.9), scored, ...S });
+  eq('printings within minGap of each other stay unidentified', f.productId, null);
+  eq('...and that is not a conflict', f.conflict, false);
+}
+{
+  const f = fuseSignals({ top: clip(77, 0.812), runnerUp: clip(242, 0.809), ocr: ocrTitle(URBORG, 0.9), ...S });
+  eq('without the ranking, a shared title cannot pick a printing', f.productId, null);
+}
+{
+  const f = fuseSignals({ top: null, runnerUp: null, ocr: ocrOf(5, 0.95), scored: [], ...S });
+  eq('a single-printing title still routes on OCR alone (Lorcana unchanged)', f.productId, 5);
+}
+
 console.log('\nprintedTitle — catalog annotations are not printed on the card');
 eq('strips (Enchanted)', printedTitle('Mike Wazowski - Heroic Climber (Enchanted)'), 'Mike Wazowski - Heroic Climber');
 eq('strips (Foil)', printedTitle('Robin Hood - Created by the Vine (Foil)'), 'Robin Hood - Created by the Vine');
 eq('leaves a plain name alone', printedTitle('Roz - Always Watching'), 'Roz - Always Watching');
 eq('only strips a TRAILING parenthetical', printedTitle('Attack of the Vine! Puzzle Insert (Top Left)'), 'Attack of the Vine! Puzzle Insert');
+eq('strips a Zeta collector number, so all three printings share one title', printedTitle('Urborg, Tomb of Yawgmoth (0242)'), 'Urborg, Tomb of Yawgmoth');
 
 console.log('\nsubstringSimilarity — tolerant of OCR junk around a good read');
 {

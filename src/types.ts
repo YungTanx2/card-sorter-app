@@ -403,6 +403,14 @@ export interface AppSettings {
   cacheTtlHours: number;
   csvColumns: CsvColumnMapping[];
   /**
+   * Per-game recognition and run-default values, keyed by TCGCSV categoryId as a string. Only the
+   * keys in GAME_SCOPED_KEYS (settings.ts) may appear. A game with no entry (Lorcana, and the
+   * games nobody runs) uses the top-level values, so Lorcana's behaviour is exactly what it was
+   * before Magic existed. Never sent to or accepted from the browser as a whole — the API scopes
+   * reads and writes with ?game_id= instead (see settings.ts).
+   */
+  gameOverrides: Record<string, Partial<AppSettings>>;
+  /**
    * Client-side capture crop, as two slider values the frontend maps to a crop rectangle
    * (see public/index.html's getCrop()) — NOT raw fractions, so the crop math lives in one
    * place. Default 100/51 reproduces the exact crop validated in the 2026-08-04 calibration
