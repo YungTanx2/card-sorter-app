@@ -27,6 +27,10 @@ import {
 } from './goals';
 import { buildKeeperCsv, buildManifestCsv } from './export';
 import { GoalConfig, SessionConfig } from './types';
+import {
+  createTuneSession, getTuneSession, validateTuneJob, addTuneJob, getTuneJob, pollTune, finishTuneJob,
+  cancelTuneJob, putTunePhoto, getTunePhoto, tuneState, TuneJobType,
+} from './tune';
 
 const app = express();
 const PORT = process.env.PORT ?? 3010;
@@ -697,6 +701,87 @@ app.put('/api/settings', (req, res) => {
   const gameId = settingsGameId(req);
   updateSettings(req.body, gameId);
   res.json(getPublicSettings(gameId));
+});
+
+// ---- remote tuning (see tune.ts) ----
+// Every route but session creation needs the session's token in X-Tune-Token. The phone page
+// creates the session and shows the token; whoever is tuning gets it from the person at the rig.
+
+function requireTune(req: express.Request, res: express.Response) {
+  const s = getTuneSession(req.get('X-Tune-Token'));
+  if (!s) res.status(401).json({ error: 'Unknown or expired tune token.' });
+  return s;
+}
+function requireTuneJob(req: express.Request, res: express.Response) {
+  const s = requireTune(req, res);
+  if (!s) return null;
+  const job = getTuneJob(s, Number(req.params.id));
+  if (!job) { res.status(404).json({ error: 'No such job.' }); return null; }
+  return { s, job };
+}
+
+app.post('/api/tune/session', (_req, res) => {
+  res.json({ token: createTuneSession() });
+});
+
+app.get('/api/tune/state', (req, res) => {
+  const s = requireTune(req, res);
+  if (s) res.json(tuneState(s));
+});
+
+app.post('/api/tune/jobs', (req, res) => {
+  const s = requireTune(req, res);
+  if (!s) return;
+  const error = validateTuneJob(req.body?.type, req.body?.params);
+  if (error) { res.status(400).json({ error }); return; }
+  res.json(addTuneJob(s, req.body.type as TuneJobType, req.body.params ?? {}));
+});
+
+app.post('/api/tune/jobs/:id/cancel', (req, res) => {
+  const t = requireTuneJob(req, res);
+  if (!t) return;
+  cancelTuneJob(t.job);
+  res.json(t.job);
+});
+
+/** Phone heartbeat: reports its state, receives the next job (or null). */
+app.post('/api/tune/poll', (req, res) => {
+  const s = requireTune(req, res);
+  if (!s) return;
+  res.json({ job: pollTune(s, req.body ?? {}) });
+});
+
+/** Phone, during a job. The reply carries the job's status so a cancel reaches the phone. */
+app.post('/api/tune/jobs/:id/progress', (req, res) => {
+  const t = requireTuneJob(req, res);
+  if (!t) return;
+  if (t.job.status === 'running') t.job.progress = req.body?.progress ?? null;
+  res.json({ status: t.job.status, cancelRequested: t.job.cancelRequested });
+});
+
+app.post('/api/tune/jobs/:id/finish', (req, res) => {
+  const t = requireTuneJob(req, res);
+  if (!t) return;
+  const status = req.body?.status;
+  if (status !== 'done' && status !== 'failed' && status !== 'cancelled') { res.status(400).json({ error: 'bad status' }); return; }
+  finishTuneJob(t.job, status, req.body?.result, typeof req.body?.error === 'string' ? req.body.error : null);
+  res.json(t.job);
+});
+
+app.post('/api/tune/jobs/:id/photo/:idx', express.raw({ type: 'image/jpeg', limit: '400kb' }), (req, res) => {
+  const t = requireTuneJob(req, res);
+  if (!t) return;
+  const error = putTunePhoto(t.s, t.job, Number(req.params.idx), Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0));
+  if (error) { res.status(400).json({ error }); return; }
+  res.json({ ok: true });
+});
+
+app.get('/api/tune/jobs/:id/photo/:idx', (req, res) => {
+  const t = requireTuneJob(req, res);
+  if (!t) return;
+  const jpeg = getTunePhoto(t.s, t.job.id, Number(req.params.idx));
+  if (!jpeg) { res.status(404).json({ error: 'No such photo.' }); return; }
+  res.type('image/jpeg').send(jpeg);
 });
 
 const server = app.listen(PORT, () => {
