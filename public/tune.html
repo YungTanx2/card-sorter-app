@@ -374,7 +374,10 @@
   // own limits and ±50% of the value found, and always written back after the test. The
   // original is stored on this phone BEFORE the first write, so an interrupted test (reload,
   // dead battery, lost link) can still be undone with the Restore button.
-  const SETTINGS_KEYS = { motor_speed_pct: ['motor_min_pct', 'motor_max_pct'], feed_out_ms: ['feed_min_ms', 'feed_max_ms'] };
+  const SETTINGS_KEYS = {
+    motor_speed_pct: ['motor_min_pct', 'motor_max_pct', 'motor_step_pct'],
+    feed_out_ms: ['feed_min_ms', 'feed_max_ms', 'feed_step_ms'],
+  };
   const SETTINGS_MAX_CHANGE = 0.5;
   const RESTORE_KEY = 'tune.restore.v1';
 
@@ -388,17 +391,20 @@
     for (const [k, v] of Object.entries(change)) {
       if (!(k in SETTINGS_KEYS)) return 'setting ' + k + ' is not one this page may change';
       if (typeof v !== 'number' || !Number.isInteger(v)) return k + ' must be a whole number';
-      const [lo, hi] = SETTINGS_KEYS[k].map((n) => limits[n]);
+      const [lo, hi, step] = SETTINGS_KEYS[k].map((n) => limits[n]);
       if (typeof lo === 'number' && v < lo) return `${k}=${v} is below the machine's minimum ${lo}`;
+      if (typeof step === 'number' && step > 0 && (v - (lo || 0)) % step !== 0) return `${k}=${v} is not a multiple of the machine's step ${step}`;
       if (typeof hi === 'number' && v > hi) return `${k}=${v} is above the machine's maximum ${hi}`;
       if (Math.abs(v - found[k]) > Math.abs(found[k]) * SETTINGS_MAX_CHANGE + 1e-9) return `${k}=${v} is more than ${SETTINGS_MAX_CHANGE * 100}% from ${found[k]}`;
     }
     return null;
   }
 
-  /** settings.get, settings.save, settings.get again — under a lease, released after. The saved
-   *  object is the machine's whole settings block with only `change` applied, and the readback
-   *  must show every changed value, or this throws. */
+  /** settings.get, settings.save, settings.get again — under a lease, released after. The save is
+   *  the vendor app's envelope: {schema_version: 1, expected_revision, settings: whole block}, the
+   *  bare block is refused as SETTINGS_INVALID (seen on the rig). expected_revision makes the
+   *  machine refuse the write if anything else changed the settings since we read them. The
+   *  readback must show every changed value, or this throws. */
   async function writeSettings(change) {
     const conn = machineCtl.conn;
     if (!conn) throw new Error('X1PRO is not connected');
@@ -407,7 +413,7 @@
     try {
       const before = await cmd('settings.get');
       if (before.kind !== 'machine_settings' || !before.settings) throw new Error('settings.get: unexpected reply ' + before.kind);
-      const saved = await cmd('settings.save', { ...before.settings, ...change });
+      const saved = await cmd('settings.save', { schema_version: 1, expected_revision: before.revision, settings: { ...before.settings, ...change } });
       if (saved.accepted === false || saved.kind === 'error') throw new Error('settings.save refused: ' + (saved.result || saved.error || JSON.stringify(saved).slice(0, 200)));
       const after = await cmd('settings.get');
       for (const [k, v] of Object.entries(change)) {
