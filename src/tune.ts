@@ -4,8 +4,9 @@
  *
  * The phone is the only thing that touches the machine. This module only passes jobs one way and
  * results the other, and the phone re-checks every job against its own limits (cards per test,
- * the motion guardrail in x1pro-run.js) — so a leaked token can at most queue the experiments
- * the phone would run anyway, while someone stands at the rig.
+ * the motion guardrail in x1pro-run.js, and for saved settings a tick-box at the rig plus a
+ * whitelist and ±50% cap) — so a leaked token can at most queue the experiments the phone would
+ * run anyway, while someone stands at the rig.
  *
  * Deliberately in memory: a session lasts one sitting at the rig. A redeploy ends it, and the
  * phone just starts a new one.
@@ -88,6 +89,18 @@ export function validateTuneJob(type: unknown, params: unknown): string | null {
       if (typeof p.motion !== 'object' || p.motion === null || Array.isArray(p.motion)) return 'motion must be an object';
       for (const [k, v] of Object.entries(p.motion)) {
         if (typeof v !== 'number' || !Number.isFinite(v)) return `motion.${k} must be a number`;
+      }
+    }
+    if (p.settings !== undefined) {
+      if (typeof p.settings !== 'object' || p.settings === null || Array.isArray(p.settings)) return 'settings must be an object';
+      for (const [k, v] of Object.entries(p.settings)) {
+        if (!Number.isInteger(v)) return `settings.${k} must be a whole number`;
+      }
+    }
+    if (p.roi !== undefined) {
+      const r = p.roi as Record<string, unknown>;
+      if (typeof r !== 'object' || r === null || !['left', 'top', 'width', 'height'].every((k) => typeof r[k] === 'number')) {
+        return 'roi must be {left, top, width, height} as frame fractions';
       }
     }
     if (p.label !== undefined && typeof p.label !== 'string') return 'label must be a string';
