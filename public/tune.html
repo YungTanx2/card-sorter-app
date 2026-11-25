@@ -92,10 +92,9 @@
     <h2>What this page does</h2>
     <p class="hint">
       Lets someone tune the X1PRO's feed from elsewhere. They send test batches; this phone runs
-      each one with the motion settings they ask for, for <strong>that batch only</strong>, sends every
-      test card to the <strong>reject bin</strong>, and photographs where each card landed. The
-      machine's saved settings are never changed from here. Each setting can move at most
-      30% from its saved value, and a test is at most 20 cards.
+      each one, sends every test card to the <strong>reject bin</strong>, and photographs where each
+      card landed. A test is at most 20 cards. Motion timing changes last for that batch only (at most
+      30%). Feed speed and push time are only changed if you allow it below, and are put back after each test.
     </p>
   </section>
 
@@ -114,6 +113,17 @@
     <div class="camera-wrap" style="margin-top:.6rem;">
       <video id="camera" playsinline autoplay muted></video>
       <div class="card-box" id="card-box" hidden></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Machine settings</h2>
+    <p class="hint">Feed speed and push time are saved on the machine itself. With this on, a test may change
+      them for its own cards (at most 50% either way) and then puts your values back. Off: tests can't write to the machine.</p>
+    <label class="row" style="gap:.6rem;"><input type="checkbox" id="allow-writes" style="width:24px;height:24px;" /> Allow temporary settings writes</label>
+    <div class="status paused" id="restore-box" hidden style="margin-top:.6rem;">
+      A test changed the machine's settings and they haven't been put back yet. Original: <span id="restore-what"></span>
+      <div class="row"><button class="primary" id="restore-btn">Restore original settings</button></div>
     </div>
   </section>
 
@@ -310,17 +320,23 @@
     }
   }
 
-  function photoBlob(frame, box) {
+  function photoBlob(frame, box, roi) {
     const c = document.createElement('canvas');
     c.width = PHOTO_W;
     c.height = Math.round(PHOTO_W * frame.height / frame.width);
     const g = c.getContext('2d');
     g.drawImage(frame, 0, 0, c.width, c.height);
+    if (roi && roi.width < 1) {
+      g.strokeStyle = '#eab308'; g.lineWidth = 1; g.setLineDash([6, 4]);
+      g.strokeRect(roi.left * c.width, roi.top * c.height, roi.width * c.width, roi.height * c.height);
+      g.setLineDash([]);
+    }
     if (box) {
       g.strokeStyle = '#22c55e'; g.lineWidth = 2;
       g.strokeRect(box.left * c.width, box.top * c.height, box.width * c.width, box.height * c.height);
       g.strokeStyle = '#ef4444';
-      g.beginPath(); g.moveTo(c.width / 2, 0); g.lineTo(c.width / 2, c.height); g.stroke();  // frame centre
+      const mid = roi ? (roi.left + roi.width / 2) * c.width : c.width / 2;
+      g.beginPath(); g.moveTo(mid, 0); g.lineTo(mid, c.height); g.stroke();  // platform centre
     }
     return new Promise((r) => c.toBlob(r, 'image/jpeg', 0.7));
   }
@@ -344,7 +360,7 @@
     return {
       cards: cards.length,
       found: ok.length,
-      offsetX: stat(ok.map((c) => c.offsetX)),   // + = right of frame centre, fraction of frame width
+      offsetX: stat(ok.map((c) => c.offsetX)),   // + = right of the platform area's centre, fraction of its width
       centerY: stat(ok.map((c) => c.centerY)),
       tiltDeg: stat(ok.map((c) => c.tiltDeg)),
       absTiltDeg: stat(ok.map((c) => Math.abs(c.tiltDeg))),
@@ -352,10 +368,156 @@
     };
   }
 
-  /** One test batch: N cards on a per-batch motion profile, all to the reject bin, each measured. */
+  // ── temporary machine-settings writes ────────────────────────
+  // Feed speed and push time are SAVED settings (settings.save), not per-batch ones, so a test of
+  // them writes to the machine. Only with the tick-box on, only these keys, within the firmware's
+  // own limits and ±50% of the value found, and always written back after the test. The
+  // original is stored on this phone BEFORE the first write, so an interrupted test (reload,
+  // dead battery, lost link) can still be undone with the Restore button.
+  const SETTINGS_KEYS = { motor_speed_pct: ['motor_min_pct', 'motor_max_pct'], feed_out_ms: ['feed_min_ms', 'feed_max_ms'] };
+  const SETTINGS_MAX_CHANGE = 0.5;
+  const RESTORE_KEY = 'tune.restore.v1';
+
+  const pendingRestore = () => { try { return JSON.parse(localStorage.getItem(RESTORE_KEY) || 'null'); } catch (e) { return null; } };
+  function setPendingRestore(rec) {
+    try { if (rec) localStorage.setItem(RESTORE_KEY, JSON.stringify(rec)); else localStorage.removeItem(RESTORE_KEY); } catch (e) { /* see banner */ }
+    renderRestore();
+  }
+
+  function checkSettingsChange(found, limits, change) {
+    for (const [k, v] of Object.entries(change)) {
+      if (!(k in SETTINGS_KEYS)) return 'setting ' + k + ' is not one this page may change';
+      if (typeof v !== 'number' || !Number.isInteger(v)) return k + ' must be a whole number';
+      const [lo, hi] = SETTINGS_KEYS[k].map((n) => limits[n]);
+      if (typeof lo === 'number' && v < lo) return `${k}=${v} is below the machine's minimum ${lo}`;
+      if (typeof hi === 'number' && v > hi) return `${k}=${v} is above the machine's maximum ${hi}`;
+      if (Math.abs(v - found[k]) > Math.abs(found[k]) * SETTINGS_MAX_CHANGE + 1e-9) return `${k}=${v} is more than ${SETTINGS_MAX_CHANGE * 100}% from ${found[k]}`;
+    }
+    return null;
+  }
+
+  /** settings.get, settings.save, settings.get again — under a lease, released after. The saved
+   *  object is the machine's whole settings block with only `change` applied, and the readback
+   *  must show every changed value, or this throws. */
+  async function writeSettings(change) {
+    const conn = machineCtl.conn;
+    if (!conn) throw new Error('X1PRO is not connected');
+    const cmd = (name, args) => conn.command(name, args || {}, window.X1ProBle.LEASED_COMMANDS.includes(name) ? conn.lease : null);
+    await cmd('device.acquire_lease', { lease_ttl_ms: 15000 });
+    try {
+      const before = await cmd('settings.get');
+      if (before.kind !== 'machine_settings' || !before.settings) throw new Error('settings.get: unexpected reply ' + before.kind);
+      const saved = await cmd('settings.save', { ...before.settings, ...change });
+      if (saved.accepted === false || saved.kind === 'error') throw new Error('settings.save refused: ' + (saved.result || saved.error || JSON.stringify(saved).slice(0, 200)));
+      const after = await cmd('settings.get');
+      for (const [k, v] of Object.entries(change)) {
+        if (!after.settings || after.settings[k] !== v) throw new Error(`settings.save did not take: ${k} reads back ${after.settings && after.settings[k]}, wanted ${v}`);
+      }
+      return after.settings;
+    } finally {
+      try { await cmd('device.release_lease'); } catch (e) { /* lapses on its own */ }
+      conn.lease = null;
+    }
+  }
+
+  async function restoreSettings() {
+    const rec = pendingRestore();
+    if (!rec) return null;
+    const conn = machineCtl.conn;
+    if (!conn) throw new Error('connect the X1PRO first');
+    if (conn.info.device_id !== rec.device) throw new Error('these settings belong to ' + rec.device);
+    const s = await writeSettings(rec.original);
+    setPendingRestore(null);
+    log('machine settings restored: ' + JSON.stringify(rec.original));
+    return s;
+  }
+
+  function renderRestore() {
+    const rec = pendingRestore();
+    $('restore-box').hidden = !rec;
+    if (rec) $('restore-what').textContent = Object.entries(rec.original).map(([k, v]) => k + ' = ' + v).join(', ');
+  }
+  $('restore-btn').addEventListener('click', async () => {
+    $('restore-btn').disabled = true;
+    try { await restoreSettings(); } catch (err) { log('restore failed: ' + err.message); $('restore-what').textContent += ' — restore failed: ' + err.message; }
+    $('restore-btn').disabled = false;
+  });
+
+  // ── measurement ──────────────────────────────────────────────
+  /** Copies `roi` (frame fractions) out of a full frame, at full resolution. */
+  function cropTo(frame, roi) {
+    const c = document.createElement('canvas');
+    c.width = Math.max(1, Math.round(roi.width * frame.width));
+    c.height = Math.max(1, Math.round(roi.height * frame.height));
+    c.getContext('2d').drawImage(frame, roi.left * frame.width, roi.top * frame.height, c.width, c.height, 0, 0, c.width, c.height);
+    return c;
+  }
+
+  function validRoi(r) {
+    if (!r) return { left: 0, top: 0, width: 1, height: 1 };
+    const ok = ['left', 'top', 'width', 'height'].every((k) => typeof r[k] === 'number' && r[k] >= 0 && r[k] <= 1)
+      && r.width > 0.05 && r.height > 0.05 && r.left + r.width <= 1.0001 && r.top + r.height <= 1.0001;
+    if (!ok) throw new Error('roi must be {left,top,width,height} fractions inside the frame');
+    return r;
+  }
+
+  /**
+   * Finds the card inside the platform area only. The camera also sees the reject pile behind
+   * the platform, which changes with every test card — differencing the whole frame merged the
+   * pile into the card. Returns the box in FULL-frame fractions (for drawing) plus offsetX as a
+   * fraction of the platform's width from the platform's centre (+ = right).
+   */
+  function measure(empty, frame, roi) {
+    const box = detectCardBox(cropTo(empty, roi), cropTo(frame, roi));
+    if (!box || box.areaFrac < 0.02 || box.areaFrac > 0.9) return { box: null };
+    const full = {
+      left: roi.left + box.left * roi.width, top: roi.top + box.top * roi.height,
+      width: box.width * roi.width, height: box.height * roi.height,
+    };
+    return { box: full, offsetX: box.centerX - 0.5, centerY: box.centerY, tiltDeg: box.tiltDeg, areaFrac: box.areaFrac,
+      width: box.width, height: box.height };
+  }
+
+  /**
+   * One test batch: N cards, all to the reject bin, each measured. Optional per-batch motion
+   * override (never saved) and optional temporary machine-settings change (saved, then put back).
+   */
   async function testBatch(job) {
     const cardsWanted = Math.min(MAX_CARDS, Math.max(1, job.params.cards | 0));
     const conn = machineCtl.conn;
+    const roi = validRoi(job.params.roi);
+    const change = job.params.settings && Object.keys(job.params.settings).length ? job.params.settings : null;
+    let settingsUsed = null;
+
+    if (change) {
+      if (!$('allow-writes').checked) throw new Error('settings change refused: "Allow temporary settings writes" is off on the phone');
+      if (pendingRestore()) throw new Error('an earlier settings change has not been restored yet — tap Restore on the phone first');
+      const cur = await conn.command('settings.get', {}, null);
+      if (cur.kind !== 'machine_settings' || !cur.settings) throw new Error('settings.get: unexpected reply ' + cur.kind);
+      const bad = checkSettingsChange(cur.settings, cur.limits || {}, change);
+      if (bad) throw new Error('settings change refused: ' + bad);
+      const original = {};
+      for (const k of Object.keys(change)) original[k] = cur.settings[k];
+      setPendingRestore({ device: conn.info.device_id, original, at: Date.now() });  // BEFORE writing
+      log('writing machine settings ' + JSON.stringify(change) + ' (was ' + JSON.stringify(original) + ')');
+      try {
+        settingsUsed = await writeSettings(change);
+      } catch (err) {
+        try { await restoreSettings(); } catch (e) { log('restore after a failed write also failed: ' + e.message); }
+        throw err;
+      }
+    }
+
+    try {
+      return await runCards(job, conn, cardsWanted, roi, change, settingsUsed);
+    } finally {
+      if (change) {
+        try { await restoreSettings(); } catch (err) { log('RESTORE FAILED: ' + err.message + ' — tap Restore'); }
+      }
+    }
+  }
+
+  async function runCards(job, conn, cardsWanted, roi, change, settingsUsed) {
     const empty = snapshotFrame(video);
     const cards = [];
     let driver, finish;
@@ -364,20 +526,22 @@
       conn,
       motionOverride: job.params.motion && Object.keys(job.params.motion).length ? job.params.motion : null,
       onLog: (m) => log('machine: ' + m),
+      // One empty reference per test, not per card: the preview runs a frame or two behind the
+      // machine, so a photo taken as the next feed starts can still show the previous card.
+      // The platform-only area (roi) is what keeps the changing reject pile out of it.
       onState: (label) => setStatus(`Job ${job.id}: card ${cards.length + 1}/${cardsWanted} — ${label.toLowerCase()}`, 'busy'),
       onCardHeld: async () => {
         await new Promise((r) => setTimeout(r, SETTLE_MS));
         const frame = snapshotFrame(video);
-        const box = detectCardBox(empty, frame);
+        const r = measure(empty, frame, roi);
         const i = cards.length;
-        const found = !!box && box.areaFrac > 0.02 && box.areaFrac < 0.85;
-        const m = found
-          ? { i, found, offsetX: r3(box.centerX - 0.5), centerY: r3(box.centerY), tiltDeg: Math.round(box.tiltDeg * 10) / 10,
-              width: r3(box.width), height: r3(box.height), areaFrac: r3(box.areaFrac) }
+        const m = r.box
+          ? { i, found: true, offsetX: r3(r.offsetX), centerY: r3(r.centerY), tiltDeg: Math.round(r.tiltDeg * 10) / 10,
+              width: r3(r.width), height: r3(r.height), areaFrac: r3(r.areaFrac) }
           : { i, found: false };
         cards.push(m);
-        showBox(found ? box : null);
-        photoBlob(frame, found ? box : null).then((b) =>
+        showBox(r.box);
+        photoBlob(frame, r.box, roi).then((b) =>
           fetch(`/api/tune/jobs/${job.id}/photo/${i}`, { method: 'POST', headers: { 'X-Tune-Token': token, 'Content-Type': 'image/jpeg' }, body: b }))
           .catch((e) => log('photo upload failed: ' + e.message));
         let cancelled = current.cancelled;
@@ -394,30 +558,29 @@
     });
     current.driver = driver;
     current.finish = finish;
+    const base = () => ({ label: job.params.label || null, roi, settingsChange: change, settingsUsed,
+      baseMotion: driver.baseMotion, sentMotion: driver.sentMotion, override: job.params.motion || {} });
     try {
       await driver.start();
     } catch (err) {
       await driver.stop();
-      err.partial = { baseMotion: driver.baseMotion, sentMotion: driver.sentMotion, cards: [] };
+      err.partial = Object.assign(base(), { cards: [] });
       throw err;
     }
     const outcome = await ended;
     await driver.stop();
     showBox(null);
-    const result = {
-      label: job.params.label || null,
-      baseMotion: driver.baseMotion,
-      sentMotion: driver.sentMotion,
-      override: job.params.motion || {},
+    const result = Object.assign(base(), {
       ended: outcome instanceof Error ? 'paused: ' + outcome.message : outcome,
       summary: summarize(cards),
       cards,
-    };
+    });
     if (outcome instanceof Error) { const e = new Error(outcome.message); e.partial = result; throw e; }
     return result;
   }
 
   renderToken();
+  renderRestore();
   if (token) keepAwake();
   heartbeat();
 })();
