@@ -46,6 +46,9 @@ window.X1ProRun = (function () {
      * @param {function} [opts.onPause]         (err) => void — run paused; card may be held
      * @param {function} [opts.onState]         (label) => void — short human-readable progress
      * @param {function} [opts.onLog]           (msg) => void
+     * @param {object}   [opts.motionOverride]  motion-profile fields to change for THIS batch
+     *                                          only (see checkMotionOverride). The machine's
+     *                                          saved profile is untouched.
      */
     constructor(opts) {
       this.conn = opts.conn;
@@ -55,6 +58,9 @@ window.X1ProRun = (function () {
       this.onPause = opts.onPause || (() => {});
       this.onState = opts.onState || (() => {});
       this.log = opts.onLog || (() => {});
+      this.motionOverride = opts.motionOverride || null;
+      this.baseMotion = null;  // the machine's saved profile, as read at start()
+      this.sentMotion = null;  // what batch.start actually carried
       this.leaseTimer = null;
       this.running = false;
       this.stopping = false;
@@ -111,7 +117,13 @@ window.X1ProRun = (function () {
       if (this.conn.capabilities.extensibilityVersion === 1) {
         const motion = await this._cmd('motion.get');
         if (motion.kind !== 'motion_settings' || !motion.profile) throw new Error('motion.get: unexpected reply ' + motion.kind);
-        args.motion_profile = { ...motion.profile, dock_ms: 0 };
+        this.baseMotion = motion.profile;
+        const bad = this.motionOverride && checkMotionOverride(motion.profile, this.motionOverride);
+        if (bad) throw new Error('motion override refused: ' + bad);
+        args.motion_profile = { ...motion.profile, ...(this.motionOverride || {}), dock_ms: 0 };
+        this.sentMotion = args.motion_profile;
+      } else if (this.motionOverride) {
+        throw new Error('this firmware takes no motion profile with batch.start');
       }
       await this._cmd('batch.start', args);
       this.status = await this.conn.waitFor(
@@ -225,6 +237,26 @@ window.X1ProRun = (function () {
     }
   }
 
+  /** Largest change a motion override may make to any one field, as a fraction of its saved value. */
+  const MOTION_MAX_CHANGE = 0.3;
+
+  /**
+   * Guardrail for per-batch motion experiments. Only fields the machine already reports, only
+   * numbers, never dock_ms (pinned to 0 above), and each within ±30% of its saved value (a field
+   * saved as 0 can't be changed, since 30% of 0 is 0). Returns a reason, or null when allowed.
+   * It lives here, beside batch.start, so any page that drives the machine gets the same limit.
+   */
+  function checkMotionOverride(base, override) {
+    for (const [k, v] of Object.entries(override)) {
+      if (k === 'dock_ms') return 'dock_ms is fixed at 0';
+      if (!(k in base)) return 'unknown field ' + k;
+      if (typeof base[k] !== 'number' || typeof v !== 'number' || !Number.isFinite(v)) return k + ' is not a number';
+      const lim = Math.abs(base[k]) * MOTION_MAX_CHANGE;
+      if (Math.abs(v - base[k]) > lim + 1e-9) return `${k}=${v} is more than ${MOTION_MAX_CHANGE * 100}% from ${base[k]}`;
+    }
+    return null;
+  }
+
   /**
    * The Connect/Disconnect button both run pages share. It lives outside Start Run because
    * requestDevice() needs a fresh tap, and starting a run spends that tap on server work before
@@ -273,5 +305,5 @@ window.X1ProRun = (function () {
     return { get conn() { return machine && machine.connected ? machine : null; } };
   }
 
-  return { X1ProRunDriver, ROUTE, connectControl };
+  return { X1ProRunDriver, ROUTE, connectControl, checkMotionOverride, MOTION_MAX_CHANGE };
 })();

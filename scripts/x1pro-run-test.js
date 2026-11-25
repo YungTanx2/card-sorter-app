@@ -19,7 +19,7 @@ global.window = {
   },
 };
 eval(fs.readFileSync(path.join(__dirname, '..', 'public', 'x1pro-run.js'), 'utf8'));
-const { X1ProRunDriver, ROUTE } = window.X1ProRun;
+const { X1ProRunDriver, ROUTE, checkMotionOverride } = window.X1ProRun;
 
 class FakeMachine {
   constructor(cards) {
@@ -45,10 +45,11 @@ class FakeMachine {
         return { kind: 'ack', accepted: true, granted_lease_id: 'L1', status: this.snap() };
       case 'device.get_status': return { kind: 'ack', accepted: true, status: this.snap() };
       case 'settings.get': return { kind: 'machine_settings', settings: { sound_enabled: true } };
-      case 'motion.get': return { kind: 'motion_settings', profile: { hold_ms: 300, dock_ms: 50 } };
+      case 'motion.get': return { kind: 'motion_settings', profile: { hold_ms: 300, dock_ms: 50, feed_speed: 80, mode: 'x' } };
       case 'batch.start':
         assert.strictEqual(leaseId, 'L1');
         assert.strictEqual(args.motion_profile.dock_ms, 0, 'dock_ms forced to 0');
+        this.startedMotion = args.motion_profile;
         Object.assign(s, { machine_state: 'PREPARE_WINDOW', run_request: 'RUNNING', batch_active: true, batch_seq: '2' });
         return { kind: 'ack', accepted: true };
       case 'cycle.feed':
@@ -223,6 +224,35 @@ function runUntil(driver, event) {
     assert.strictEqual(m.s.counters.routed_pass, 2, 'the completing card was routed, not stranded');
     assert.strictEqual(m.sent.filter((c) => c.name === 'cycle.feed').length, 2, 'no third feed');
     assert.strictEqual(m.cards.length, 1, 'the third card never left the hopper');
+    await d.stop();
+  });
+
+  await test('motion override: applied to this batch only, saved profile untouched', async () => {
+    const m = new FakeMachine(['bulk']);
+    const d = new X1ProRunDriver({ conn: m, motionOverride: { feed_speed: 60 }, onCardHeld: async () => ROUTE.REJECT });
+    const done = runUntil(d, 'empty');
+    await d.start();
+    await done;
+    assert.deepStrictEqual(m.startedMotion, { hold_ms: 300, dock_ms: 0, feed_speed: 60, mode: 'x' });
+    assert.strictEqual(d.baseMotion.feed_speed, 80, 'base profile reported as read');
+    assert(!m.sent.some((c) => c.name === 'motion.save'), 'never saves');
+    await d.stop();
+  });
+
+  await test('motion override guardrail', async () => {
+    const base = { hold_ms: 300, dock_ms: 50, feed_speed: 80, zero: 0, mode: 'x' };
+    assert.strictEqual(checkMotionOverride(base, { feed_speed: 56, hold_ms: 390 }), null, 'exactly 30% is allowed');
+    assert(/more than 30%/.test(checkMotionOverride(base, { feed_speed: 55 })));
+    assert(/unknown field/.test(checkMotionOverride(base, { turbo: 1 })));
+    assert(/not a number/.test(checkMotionOverride(base, { mode: 1 })));
+    assert(/not a number/.test(checkMotionOverride(base, { feed_speed: '60' })));
+    assert(/dock_ms/.test(checkMotionOverride(base, { dock_ms: 40 })));
+    assert(/more than 30%/.test(checkMotionOverride(base, { zero: 1 })), 'a field saved as 0 cannot move');
+    // A refused override never reaches batch.start: the batch is not started at all.
+    const m = new FakeMachine(['bulk']);
+    const d = new X1ProRunDriver({ conn: m, motionOverride: { feed_speed: 200 }, onCardHeld: async () => ROUTE.REJECT });
+    await assert.rejects(d.start(), /motion override refused/);
+    assert(!m.sent.some((c) => c.name === 'batch.start'));
     await d.stop();
   });
 

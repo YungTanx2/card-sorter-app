@@ -676,6 +676,7 @@ window.CardSorterCapture = (function () {
     for (let s0 = 0; s0 < W * H; s0++) {
       if (!mask[s0] || seen[s0]) continue;
       let n = 0, x0 = W, y0 = H, x1 = -1, y1 = -1;
+      let sx = 0, sy = 0, sxx = 0, syy = 0, sxy = 0;  // moments, for centre and tilt
       const stack = [s0];
       seen[s0] = 1;
       while (stack.length) {
@@ -686,12 +687,13 @@ window.CardSorterCapture = (function () {
         if (x > x1) x1 = x;
         if (y < y0) y0 = y;
         if (y > y1) y1 = y;
+        sx += x; sy += y; sxx += x * x; syy += y * y; sxy += x * y;
         if (x > 0 && mask[p - 1] && !seen[p - 1]) { seen[p - 1] = 1; stack.push(p - 1); }
         if (x < W - 1 && mask[p + 1] && !seen[p + 1]) { seen[p + 1] = 1; stack.push(p + 1); }
         if (y > 0 && mask[p - W] && !seen[p - W]) { seen[p - W] = 1; stack.push(p - W); }
         if (y < H - 1 && mask[p + W] && !seen[p + W]) { seen[p + W] = 1; stack.push(p + W); }
       }
-      comps.push({ n, x0, y0, x1, y1 });
+      comps.push({ n, x0, y0, x1, y1, sx, sy, sxx, syy, sxy });
     }
     if (!comps.length) return null;
     comps.sort((p, q) => q.n - p.n);
@@ -706,6 +708,21 @@ window.CardSorterCapture = (function () {
     }
     const out = { left: box.x0 / W, top: box.y0 / H, width: (box.x1 - box.x0 + 1) / W, height: (box.y1 - box.y0 + 1) / H };
     out.areaFrac = out.width * out.height;
+    // Centre and tilt of the largest blob alone (the merged box can include a nearby shadow).
+    // The tilt is the long axis's angle from second moments. Square pixels: W and H share one
+    // scale. A card is 5:7, so its long axis is well defined; tiltDeg is how far that axis
+    // sits off the nearest of vertical/horizontal (+ = clockwise on screen).
+    const m = comps[0];
+    const mx = m.sx / m.n, my = m.sy / m.n;
+    const mu20 = m.sxx / m.n - mx * mx, mu02 = m.syy / m.n - my * my, mu11 = m.sxy / m.n - mx * my;
+    const axisDeg = 0.5 * Math.atan2(2 * mu11, mu20 - mu02) * 180 / Math.PI;  // long axis vs +x
+    let tilt = axisDeg % 90;
+    if (tilt > 45) tilt -= 90;
+    if (tilt < -45) tilt += 90;
+    out.centerX = (mx + 0.5) / W;
+    out.centerY = (my + 0.5) / H;
+    out.axisDeg = axisDeg;
+    out.tiltDeg = tilt;
     return out;
   }
 

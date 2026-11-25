@@ -1,0 +1,426 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+<title>X1PRO Remote Tune</title>
+<link rel="stylesheet" href="/mobile.css" />
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg: #0f1117;
+    --surface: #1a1d27;
+    --surface2: #222636;
+    --border: #2d3148;
+    --text: #e2e8f0;
+    --muted: #8892a4;
+    --accent: #6366f1;
+    --green: #22c55e;
+    --red: #ef4444;
+    --yellow: #eab308;
+  }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: var(--bg); color: var(--text); min-height: 100vh;
+    display: flex; flex-direction: column;
+  }
+
+  header {
+    display: flex; align-items: center; gap: 0.5rem; padding: 0.75rem 1rem;
+    background: var(--surface); border-bottom: 1px solid var(--border);
+    position: sticky; top: 0; z-index: 10;
+  }
+  header h1 { font-size: 1rem; font-weight: 600; margin-right: auto; }
+  header nav { display: flex; gap: 0.35rem; }
+  header nav a.nav-link {
+    display: inline-flex; align-items: center; color: var(--accent); border: 1px solid var(--border);
+    border-radius: 6px; padding: 0.35rem 0.6rem; font-size: 0.8rem; text-decoration: none;
+  }
+
+  main { flex: 1; padding: 1rem; max-width: 720px; width: 100%; margin: 0 auto; }
+  section { background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+    padding: 0.85rem; margin-bottom: 0.85rem; }
+  h2 { font-size: 0.95rem; margin-bottom: 0.5rem; }
+  .row { display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center; margin-top: 0.5rem; }
+
+  button {
+    background: var(--surface2); color: var(--text); border: 1px solid var(--border);
+    border-radius: 8px; padding: 0.6rem 0.85rem; font-size: 0.9rem; cursor: pointer; min-height: 44px;
+  }
+  button.primary { background: var(--accent); border-color: var(--accent); color: white; font-weight: 600; }
+  button.danger { background: var(--red); border-color: var(--red); color: white; font-weight: 700; }
+  button:disabled { opacity: 0.4; cursor: default; }
+
+  .hint { font-size: 0.78rem; color: var(--muted); line-height: 1.4; }
+  .machine-state { font-size: 0.8rem; color: var(--muted); }
+  .machine-state.ok { color: var(--green); }
+
+  .camera-wrap { position: relative; background: #000; border-radius: 12px; overflow: hidden; aspect-ratio: 3/4; }
+  .camera-wrap video { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .card-box { position: absolute; border: 2px solid var(--green); border-radius: 4px; pointer-events: none; }
+  .card-box[hidden] { display: none; }
+
+  .token { font-family: ui-monospace, monospace; font-size: 1rem; letter-spacing: 0.03em; word-break: break-all;
+    background: #0b0d12; border: 1px solid var(--border); border-radius: 8px; padding: 0.6rem; margin-top: 0.5rem; }
+
+  /* The one control that must always be findable: pinned to the bottom of the screen. */
+  .stop-bar { position: sticky; bottom: 0; background: var(--bg); padding: 0.6rem 1rem calc(0.6rem + env(safe-area-inset-bottom));
+    border-top: 1px solid var(--border); display: flex; gap: 0.6rem; align-items: center; }
+  .stop-bar button { flex: 1; min-height: 56px; font-size: 1.05rem; }
+  .status { font-size: 0.85rem; padding: 0.6rem; border-radius: 8px; background: var(--surface2); border: 1px solid var(--border); }
+  .status.paused { border-color: var(--yellow); color: var(--yellow); }
+  .status.busy { border-color: var(--accent); }
+
+  pre { background: #0b0d12; border: 1px solid var(--border); border-radius: 8px; padding: 0.6rem;
+    font-size: 0.72rem; line-height: 1.35; white-space: pre-wrap; word-break: break-all;
+    max-height: 16rem; overflow-y: auto; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Remote Tune</h1>
+  <nav>
+    <a class="nav-link" href="/">Sorter</a>
+    <a class="nav-link" href="/sets.html">Set Builder</a>
+  </nav>
+</header>
+
+<main>
+  <section>
+    <h2>What this page does</h2>
+    <p class="hint">
+      Lets someone tune the X1PRO's feed from elsewhere. They send test batches; this phone runs
+      each one with the motion settings they ask for, for <strong>that batch only</strong>, sends every
+      test card to the <strong>reject bin</strong>, and photographs where each card landed. The
+      machine's saved settings are never changed from here. Each setting can move at most
+      30% from its saved value, and a test is at most 20 cards.
+    </p>
+  </section>
+
+  <section>
+    <h2>1. Connect</h2>
+    <div class="row">
+      <button id="x1pro-connect-btn">Connect X1PRO (Bluetooth)</button>
+      <span class="machine-state" id="x1pro-state"></span>
+    </div>
+  </section>
+
+  <section>
+    <h2>2. Camera</h2>
+    <p class="hint">Keep the platform clear between tests. The empty platform is photographed at the start of every test.</p>
+    <div class="row"><button id="camera-btn">Start camera</button><span class="hint" id="camera-state"></span></div>
+    <div class="camera-wrap" style="margin-top:.6rem;">
+      <video id="camera" playsinline autoplay muted></video>
+      <div class="card-box" id="card-box" hidden></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>3. Remote session</h2>
+    <p class="hint">Start a session, then send this code to whoever is tuning. Anyone with the code can queue tests for this phone, so share it only with them.</p>
+    <div class="row">
+      <button class="primary" id="session-btn">Start session</button>
+      <button id="copy-btn" hidden>Copy code</button>
+    </div>
+    <div class="token" id="token" hidden></div>
+  </section>
+
+  <section>
+    <h2>Activity</h2>
+    <div class="status" id="status">Not running.</div>
+    <pre id="log" style="margin-top:.6rem;"></pre>
+  </section>
+</main>
+
+<div class="stop-bar">
+  <button class="danger" id="stop-btn">STOP</button>
+  <button id="resume-btn" hidden>Resume</button>
+</div>
+
+<script src="/capture.js"></script>
+<script src="/x1pro-ble.js"></script>
+<script src="/x1pro-run.js"></script>
+<script>
+(function () {
+  'use strict';
+  const $ = (id) => document.getElementById(id);
+  const { snapshotFrame, detectCardBox, VIDEO_CONSTRAINTS } = window.CardSorterCapture;
+  const { X1ProRunDriver, ROUTE, connectControl } = window.X1ProRun;
+
+  const TOKEN_KEY = 'tune.token.v1';
+  const POLL_MS = 2000;
+  const MAX_CARDS = 20;            // the phone's own cap; the server's matches
+  const SETTLE_MS = 700;           // same settle as Calibrate's machine feed
+  const PHOTO_W = 480;
+
+  const machineCtl = connectControl($('x1pro-connect-btn'), $('x1pro-state'));
+
+  let token = null;
+  try { token = localStorage.getItem(TOKEN_KEY); } catch (e) { /* storage blocked */ }
+  let paused = false;
+  let current = null;              // { job, driver, cancelled }
+
+  function log(msg) {
+    const t = new Date().toLocaleTimeString();
+    const el = $('log');
+    el.textContent = `${t}  ${msg}\n` + el.textContent.slice(0, 8000);
+    console.log('[tune]', msg);
+  }
+  function setStatus(text, cls) { $('status').textContent = text; $('status').className = 'status' + (cls ? ' ' + cls : ''); }
+
+  async function tapi(path, opts) {
+    opts = opts || {};
+    const headers = Object.assign({ 'X-Tune-Token': token || '' }, opts.headers || {});
+    let body = opts.body;
+    if (body && !(body instanceof Blob)) { headers['Content-Type'] = 'application/json'; body = JSON.stringify(body); }
+    const res = await fetch(path, { method: opts.method || 'POST', headers, body });
+    const out = await res.json().catch(() => null);
+    if (!res.ok) throw new Error((out && out.error) || res.status + ' ' + res.statusText);
+    return out;
+  }
+
+  // ── camera ───────────────────────────────────────────────────
+  const video = $('camera');
+  $('camera-btn').addEventListener('click', async () => {
+    try {
+      video.srcObject = await navigator.mediaDevices.getUserMedia({ video: VIDEO_CONSTRAINTS, audio: false });
+      await video.play();
+      $('camera-state').textContent = video.videoWidth + '×' + video.videoHeight;
+      $('camera-btn').hidden = true;
+    } catch (err) {
+      $('camera-state').textContent = 'Camera failed: ' + err.message;
+    }
+  });
+  const cameraLive = () => video.videoWidth > 0 && !video.paused;
+
+  // The phone sits on the rig for the whole session; a dimmed screen would throttle the page.
+  let wakeLock = null;
+  async function keepAwake() {
+    try { if (!wakeLock && navigator.wakeLock) { wakeLock = await navigator.wakeLock.request('screen'); wakeLock.addEventListener('release', () => { wakeLock = null; }); } } catch (e) { /* best effort */ }
+  }
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && token) keepAwake(); });
+
+  // ── session ──────────────────────────────────────────────────
+  function renderToken() {
+    $('token').hidden = !token;
+    $('copy-btn').hidden = !token;
+    $('token').textContent = token || '';
+    $('session-btn').textContent = token ? 'New session (new code)' : 'Start session';
+  }
+  $('session-btn').addEventListener('click', async () => {
+    try {
+      const r = await fetch('/api/tune/session', { method: 'POST' }).then((x) => x.json());
+      token = r.token;
+      try { localStorage.setItem(TOKEN_KEY, token); } catch (e) { /* this load only */ }
+      renderToken();
+      keepAwake();
+      log('session started');
+    } catch (err) { log('could not start a session: ' + err.message); }
+  });
+  $('copy-btn').addEventListener('click', () => {
+    navigator.clipboard.writeText(token).then(() => log('code copied'), () => log('copy failed — select the code by hand'));
+  });
+
+  // ── stop / resume ────────────────────────────────────────────
+  $('stop-btn').addEventListener('click', async () => {
+    paused = true;
+    $('resume-btn').hidden = false;
+    setStatus('STOPPED. No tests will run until you tap Resume.', 'paused');
+    if (current) {
+      current.cancelled = true;
+      log('stop: ending the batch now — clear any card left on the platform');
+      // The driver's loop ends quietly once stopping (no callback fires), so end the job here.
+      if (current.finish) current.finish('stopped on the phone');
+      if (current.driver) { try { await current.driver.stop(); } catch (e) { /* stop is best effort */ } }
+    }
+  });
+  $('resume-btn').addEventListener('click', () => {
+    paused = false;
+    $('resume-btn').hidden = true;
+    setStatus('Waiting for tests.');
+  });
+
+  // ── heartbeat + job pickup ───────────────────────────────────
+  function phoneState() {
+    const conn = machineCtl.conn;
+    return {
+      ready: !!conn && cameraLive() && !current,
+      paused,
+      jobId: current ? current.job.id : null,
+      connected: !!conn,
+      device: conn ? conn.info.device_id : null,
+      firmware: conn ? conn.capabilities.firmware : null,
+      camera: cameraLive() ? video.videoWidth + 'x' + video.videoHeight : null,
+    };
+  }
+
+  async function heartbeat() {
+    if (!token) return;
+    try {
+      const r = await tapi('/api/tune/poll', { body: phoneState() });
+      if (r.job && !current) runJob(r.job);
+    } catch (err) {
+      if (/expired|Unknown/.test(err.message)) { log('session expired — start a new one'); token = null; renderToken(); }
+    }
+    if (!current && !paused) {
+      const why = !machineCtl.conn ? 'Connect the X1PRO.' : !cameraLive() ? 'Start the camera.' : !token ? 'Start a session.' : 'Waiting for tests.';
+      setStatus(why);
+    }
+  }
+  setInterval(heartbeat, POLL_MS);
+
+  // ── jobs ─────────────────────────────────────────────────────
+  async function runJob(job) {
+    current = { job, driver: null, cancelled: false };
+    setStatus(`Running job ${job.id} (${job.type})…`, 'busy');
+    log(`job ${job.id}: ${job.type} ${JSON.stringify(job.params)}`);
+    let status = 'done', result = null, error = null;
+    try {
+      result = job.type === 'probe' ? await probe() : await testBatch(job);
+      if (current.cancelled) status = 'cancelled';
+    } catch (err) {
+      status = current.cancelled ? 'cancelled' : 'failed';
+      error = err.message;
+      result = err.partial || null;
+      log(`job ${job.id} ${status}: ${err.message}`);
+    }
+    try { await tapi(`/api/tune/jobs/${job.id}/finish`, { body: { status, result, error } }); } catch (e) { log('could not report job: ' + e.message); }
+    log(`job ${job.id} ${status}`);
+    current = null;
+    if (!paused) setStatus('Waiting for tests.');
+  }
+
+  /** Read-only: what the machine reports about itself. Takes and releases a lease, nothing else. */
+  async function probe() {
+    const conn = machineCtl.conn;
+    const cmd = (name, args) => conn.command(name, args || {}, window.X1ProBle.LEASED_COMMANDS.includes(name) ? conn.lease : null);
+    await cmd('device.acquire_lease', { lease_ttl_ms: 15000 });
+    try {
+      const status = (await cmd('device.get_status')).status;
+      const settings = await cmd('settings.get');
+      const motion = await cmd('motion.get');
+      let optical = null;
+      try { optical = await cmd('optical.get'); } catch (e) { optical = { error: e.message }; }
+      return { info: conn.info, capabilities: conn.capabilities, status, settings, motion, optical };
+    } finally {
+      try { await cmd('device.release_lease'); } catch (e) { /* lapses on its own */ }
+      conn.lease = null;
+    }
+  }
+
+  function photoBlob(frame, box) {
+    const c = document.createElement('canvas');
+    c.width = PHOTO_W;
+    c.height = Math.round(PHOTO_W * frame.height / frame.width);
+    const g = c.getContext('2d');
+    g.drawImage(frame, 0, 0, c.width, c.height);
+    if (box) {
+      g.strokeStyle = '#22c55e'; g.lineWidth = 2;
+      g.strokeRect(box.left * c.width, box.top * c.height, box.width * c.width, box.height * c.height);
+      g.strokeStyle = '#ef4444';
+      g.beginPath(); g.moveTo(c.width / 2, 0); g.lineTo(c.width / 2, c.height); g.stroke();  // frame centre
+    }
+    return new Promise((r) => c.toBlob(r, 'image/jpeg', 0.7));
+  }
+
+  function showBox(box) {
+    const el = $('card-box');
+    el.hidden = !box;
+    if (!box) return;
+    Object.assign(el.style, { left: box.left * 100 + '%', top: box.top * 100 + '%', width: box.width * 100 + '%', height: box.height * 100 + '%' });
+  }
+
+  const r3 = (x) => Math.round(x * 1000) / 1000;
+  function summarize(cards) {
+    const ok = cards.filter((c) => c.found);
+    const stat = (xs) => {
+      if (!xs.length) return null;
+      const mean = xs.reduce((a, b) => a + b, 0) / xs.length;
+      const sd = Math.sqrt(xs.reduce((a, b) => a + (b - mean) ** 2, 0) / xs.length);
+      return { mean: r3(mean), sd: r3(sd), min: r3(Math.min(...xs)), max: r3(Math.max(...xs)) };
+    };
+    return {
+      cards: cards.length,
+      found: ok.length,
+      offsetX: stat(ok.map((c) => c.offsetX)),   // + = right of frame centre, fraction of frame width
+      centerY: stat(ok.map((c) => c.centerY)),
+      tiltDeg: stat(ok.map((c) => c.tiltDeg)),
+      absTiltDeg: stat(ok.map((c) => Math.abs(c.tiltDeg))),
+      over5deg: ok.filter((c) => Math.abs(c.tiltDeg) > 5).length,
+    };
+  }
+
+  /** One test batch: N cards on a per-batch motion profile, all to the reject bin, each measured. */
+  async function testBatch(job) {
+    const cardsWanted = Math.min(MAX_CARDS, Math.max(1, job.params.cards | 0));
+    const conn = machineCtl.conn;
+    const empty = snapshotFrame(video);
+    const cards = [];
+    let driver, finish;
+    const ended = new Promise((r) => { finish = r; });
+    driver = new X1ProRunDriver({
+      conn,
+      motionOverride: job.params.motion && Object.keys(job.params.motion).length ? job.params.motion : null,
+      onLog: (m) => log('machine: ' + m),
+      onState: (label) => setStatus(`Job ${job.id}: card ${cards.length + 1}/${cardsWanted} — ${label.toLowerCase()}`, 'busy'),
+      onCardHeld: async () => {
+        await new Promise((r) => setTimeout(r, SETTLE_MS));
+        const frame = snapshotFrame(video);
+        const box = detectCardBox(empty, frame);
+        const i = cards.length;
+        const found = !!box && box.areaFrac > 0.02 && box.areaFrac < 0.85;
+        const m = found
+          ? { i, found, offsetX: r3(box.centerX - 0.5), centerY: r3(box.centerY), tiltDeg: Math.round(box.tiltDeg * 10) / 10,
+              width: r3(box.width), height: r3(box.height), areaFrac: r3(box.areaFrac) }
+          : { i, found: false };
+        cards.push(m);
+        showBox(found ? box : null);
+        photoBlob(frame, found ? box : null).then((b) =>
+          fetch(`/api/tune/jobs/${job.id}/photo/${i}`, { method: 'POST', headers: { 'X-Tune-Token': token, 'Content-Type': 'image/jpeg' }, body: b }))
+          .catch((e) => log('photo upload failed: ' + e.message));
+        let cancelled = current.cancelled;
+        try {
+          const p = await tapi(`/api/tune/jobs/${job.id}/progress`, { body: { progress: { done: cards.length, of: cardsWanted, last: m } } });
+          if (p.cancelRequested) { cancelled = true; current.cancelled = true; log('cancelled remotely'); }
+        } catch (e) { /* progress is best effort */ }
+        const last = cancelled || cards.length >= cardsWanted;
+        return last ? { routeId: ROUTE.REJECT, last: true } : ROUTE.REJECT;
+      },
+      onLastRouted: () => finish('routed'),
+      onHopperEmpty: () => finish('empty'),
+      onPause: (err) => finish(err),
+    });
+    current.driver = driver;
+    current.finish = finish;
+    try {
+      await driver.start();
+    } catch (err) {
+      await driver.stop();
+      err.partial = { baseMotion: driver.baseMotion, sentMotion: driver.sentMotion, cards: [] };
+      throw err;
+    }
+    const outcome = await ended;
+    await driver.stop();
+    showBox(null);
+    const result = {
+      label: job.params.label || null,
+      baseMotion: driver.baseMotion,
+      sentMotion: driver.sentMotion,
+      override: job.params.motion || {},
+      ended: outcome instanceof Error ? 'paused: ' + outcome.message : outcome,
+      summary: summarize(cards),
+      cards,
+    };
+    if (outcome instanceof Error) { const e = new Error(outcome.message); e.partial = result; throw e; }
+    return result;
+  }
+
+  renderToken();
+  if (token) keepAwake();
+  heartbeat();
+})();
+</script>
+</body>
+</html>
