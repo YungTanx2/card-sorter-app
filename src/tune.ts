@@ -13,7 +13,7 @@
  */
 import crypto from 'crypto';
 
-export type TuneJobType = 'probe' | 'test';
+export type TuneJobType = 'probe' | 'test' | 'save';
 export type TuneJobStatus = 'queued' | 'running' | 'done' | 'failed' | 'cancelled';
 
 export interface TuneJob {
@@ -79,9 +79,15 @@ export function getTuneSession(token: unknown): TuneSession | null {
 
 /** Shape check only. The phone owns the real limits, because only it knows the saved profile. */
 export function validateTuneJob(type: unknown, params: unknown): string | null {
-  if (type !== 'probe' && type !== 'test') return "type must be 'probe' or 'test'";
+  if (type !== 'probe' && type !== 'test' && type !== 'save') return "type must be 'probe', 'test' or 'save'";
   const p = (params ?? {}) as Record<string, unknown>;
   if (typeof p !== 'object' || Array.isArray(p)) return 'params must be an object';
+  if (type === 'save') {
+    // Permanent: the phone also needs its own tick-box and applies the same limits as a test.
+    const st = p.settings as Record<string, unknown> | undefined;
+    if (typeof st !== 'object' || st === null || Array.isArray(st) || !Object.keys(st).length) return 'save needs a settings object';
+    for (const [k, v] of Object.entries(st)) if (!Number.isInteger(v)) return `settings.${k} must be a whole number`;
+  }
   if (type === 'test') {
     const cards = p.cards;
     if (!Number.isInteger(cards) || (cards as number) < 1 || (cards as number) > MAX_TEST_CARDS) return `cards must be 1-${MAX_TEST_CARDS}`;

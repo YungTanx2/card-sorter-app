@@ -121,6 +121,8 @@
     <p class="hint">Feed speed and push time are saved on the machine itself. With this on, a test may change
       them for its own cards (at most 50% either way) and then puts your values back. Off: tests can't write to the machine.</p>
     <label class="row" style="gap:.6rem;"><input type="checkbox" id="allow-writes" style="width:24px;height:24px;" /> Allow temporary settings writes</label>
+    <label class="row" style="gap:.6rem;"><input type="checkbox" id="allow-save" style="width:24px;height:24px;" /> Allow one permanent save</label>
+    <p class="hint">A permanent save keeps the new value — nothing is put back. Same limits as tests. The box unticks itself after one save.</p>
     <div class="status paused" id="restore-box" hidden style="margin-top:.6rem;">
       A test changed the machine's settings and they haven't been put back yet. Original: <span id="restore-what"></span>
       <div class="row"><button class="primary" id="restore-btn">Restore original settings</button></div>
@@ -288,7 +290,7 @@
     log(`job ${job.id}: ${job.type} ${JSON.stringify(job.params)}`);
     let status = 'done', result = null, error = null;
     try {
-      result = job.type === 'probe' ? await probe() : await testBatch(job);
+      result = job.type === 'probe' ? await probe() : job.type === 'save' ? await saveSettings(job) : await testBatch(job);
       if (current.cancelled) status = 'cancelled';
     } catch (err) {
       status = current.cancelled ? 'cancelled' : 'failed';
@@ -300,6 +302,29 @@
     log(`job ${job.id} ${status}`);
     current = null;
     if (!paused) setStatus('Waiting for tests.');
+  }
+
+  /** Permanent settings change, asked for by the owner after tests. Same whitelist and limits as a
+   *  test's temporary write, but nothing is put back — so it needs its own tick-box, which is
+   *  cleared after one use, and it refuses while a temporary change is still waiting to be restored. */
+  async function saveSettings(job) {
+    const change = job.params.settings || {};
+    if (!Object.keys(change).length) throw new Error('nothing to save');
+    if (!$('allow-save').checked) throw new Error('save refused: "Allow one permanent save" is off on the phone');
+    if (pendingRestore()) throw new Error('an earlier test change has not been restored yet — tap Restore on the phone first');
+    const conn = machineCtl.conn;
+    if (!conn) throw new Error('X1PRO is not connected');
+    const cur = await conn.command('settings.get', {}, null);
+    if (cur.kind !== 'machine_settings' || !cur.settings) throw new Error('settings.get: unexpected reply ' + cur.kind);
+    const bad = checkSettingsChange(cur.settings, cur.limits || {}, change);
+    if (bad) throw new Error('save refused: ' + bad);
+    const before = {};
+    for (const k of Object.keys(change)) before[k] = cur.settings[k];
+    $('allow-save').checked = false;
+    log('SAVING machine settings permanently ' + JSON.stringify(change) + ' (was ' + JSON.stringify(before) + ')');
+    const after = await writeSettings(change);
+    log('saved: ' + JSON.stringify(change));
+    return { before, saved: change, settings: after };
   }
 
   /** Read-only: what the machine reports about itself. Takes and releases a lease, nothing else. */
