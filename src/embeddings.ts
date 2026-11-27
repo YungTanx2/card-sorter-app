@@ -209,8 +209,36 @@ async function backfillRotations(candidate: CandidateCard): Promise<boolean> {
  * decides routing.
  */
 export async function scoreCandidates(imageBuffer: Buffer, candidates: CandidateCard[]): Promise<EmbeddingMatch[]> {
-  const queryEmbedding = await embedImage(imageBuffer);
+  return rankByEmbedding(await embedImage(imageBuffer), candidates);
+}
 
+/**
+ * How far the flipped capture's best score must beat the upright one's before the card is taken
+ * to be upside-down. Measured on 445 AotV frames (2026-11-27): cards that really were upside-down
+ * or sideways won by 0.056–0.124 when flipped, while upright cards whose flipped image happened to
+ * score higher (against the WRONG card — usually a landscape location, whose rotated references
+ * attract anything turned round) won by at most 0.023. 0.04 sits between the two.
+ */
+export const FLIP_MARGIN = 0.04;
+
+/**
+ * scoreCandidates, but also tries the capture turned 180°. The feeder can put a card in
+ * upside-down, and the references are all upright, so such a card either scores low against
+ * everything or — worse — confidently matches a location card whose rotated reference happens to
+ * fit. The flipped ranking is used only when it clearly wins (FLIP_MARGIN), so an upright card is
+ * never re-read against a near-tie. Always scores both ways, even when the upright match is
+ * confident, because the dangerous case IS a confident upright match. Costs one extra embedding
+ * (~110 ms), which runs alongside OCR.
+ */
+export async function scoreEitherWayUp(imageBuffer: Buffer, candidates: CandidateCard[]): Promise<{ scored: EmbeddingMatch[]; flipped: boolean }> {
+  const upright = await scoreCandidates(imageBuffer, candidates);
+  const flippedScores = await scoreCandidates(await sharp(imageBuffer).rotate(180).toBuffer(), candidates);
+  const u = upright[0]?.score ?? -Infinity;
+  const f = flippedScores[0]?.score ?? -Infinity;
+  return f - u >= FLIP_MARGIN ? { scored: flippedScores, flipped: true } : { scored: upright, flipped: false };
+}
+
+function rankByEmbedding(queryEmbedding: number[], candidates: CandidateCard[]): EmbeddingMatch[] {
   const scored: EmbeddingMatch[] = [];
   for (const c of candidates) {
     const rows = selectVariants.all(c.productId, MODEL_ID) as { variant: string; embedding: string }[];
