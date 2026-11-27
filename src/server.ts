@@ -4,7 +4,7 @@ import path from 'path';
 import { db } from './db';
 import { shutdownOcr } from './ocr';
 import { fetchCategories, fetchSets, fetchVariants, fetchRarities, getCandidatesForSets } from './tcgcsv';
-import { scoreCandidates } from './embeddings';
+import { scoreEitherWayUp } from './embeddings';
 import { straightenCard } from './straighten';
 import sharp from 'sharp';
 import { getSettings, getPublicSettings, updateSettings, validateSettingsPatch } from './settings';
@@ -492,7 +492,8 @@ app.get('/api/capture-sample/:id/candidates', async (req, res) => {
     const cropped = await sharp(ctx.frame).extract(rect).resize({ width: w, height: h }).toBuffer();
 
     const candidates = getCandidatesForSets(ctx.goal.setIds, ctx.goal.variant);
-    const scored = await scoreCandidates(getSettings(ctx.goal.gameId).straightenEnabled ? (await straightenCard(cropped)).image : cropped, candidates);
+    // Same orientation rule as the live scan, so the labelling view ranks what routing saw.
+    const { scored } = await scoreEitherWayUp(getSettings(ctx.goal.gameId).straightenEnabled ? (await straightenCard(cropped)).image : cropped, candidates);
     const byId = new Map(candidates.map((c) => [c.productId, c]));
 
     res.json({

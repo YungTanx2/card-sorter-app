@@ -2,7 +2,7 @@ import crypto from 'crypto';
 import sharp from 'sharp';
 import { db } from './db';
 import { StallError } from './errors';
-import { scoreCandidates, prewarmEmbeddings } from './embeddings';
+import { scoreEitherWayUp, prewarmEmbeddings } from './embeddings';
 import { straightenCard } from './straighten';
 import { readCardTitle, fuseSignals, OcrTitleMatch, titleBandsFor } from './ocr';
 import { getSettings } from './settings';
@@ -578,7 +578,8 @@ export async function scanGoalCard(goalSessionId: string, imageBuffer: Buffer): 
     const [match, ocrResult] = await Promise.all([
       // OCR keeps the original capture: its own detectCard() finds the title band in it.
       (settings.straightenEnabled ? straightenCard(imageBuffer).then((s) => s.image) : Promise.resolve(imageBuffer))
-        .then((buf) => scoreCandidates(buf, candidates)),
+        .then((buf) => scoreEitherWayUp(buf, candidates))
+        .then((r) => { if (r.flipped) console.log('[goal-scan] matched upside-down'); return r.scored; }),
       settings.ocrEnabled
         ? readCardTitle(imageBuffer, candidates, { minTitleChars: settings.ocrMinTitleChars, bands: titleBandsFor(goal.gameId) })
         : Promise.resolve(null),
